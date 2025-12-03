@@ -1,0 +1,6 @@
+[unstable]
+bindeps = true
+
+[alias]
+b = "build"
+r = "run"
