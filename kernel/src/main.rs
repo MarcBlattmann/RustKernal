@@ -25,7 +25,6 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     loop {
         core::hint::spin_loop();
-        
     }
 }
 
