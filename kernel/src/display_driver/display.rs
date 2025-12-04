@@ -10,6 +10,7 @@ pub fn init_screen(boot_info: &'static mut BootInfo) -> Screen {
         framebuffer.buffer_mut(),
         info.pixel_format,
     );
+    
     return display;
 }
 
