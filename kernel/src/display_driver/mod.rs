@@ -1,3 +1,3 @@
 pub mod display;
 
-pub use display::Display;
+pub use display::Screen;
