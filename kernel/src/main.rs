@@ -8,20 +8,15 @@ mod tools;
 use core::panic::PanicInfo;
 use bootloader_api::{entry_point, BootInfo};
 use heap::init_heap;
-use display_driver::Screen;
+use display_driver::display::init_screen;
 
 entry_point!(kernel_main);
 
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     init_heap();
-    let framebuffer = boot_info.framebuffer.as_mut().expect("No framebuffer found");
-    let info = framebuffer.info();
-    let display = Screen::new(
-        info.width,
-        info.height,
-        framebuffer.buffer_mut(),
-        info.pixel_format,
-    );
+    let mut screen = init_screen(boot_info);
+
+    screen.write_pixel(10, 10, "#ff5634");
 
     loop {
         core::hint::spin_loop();

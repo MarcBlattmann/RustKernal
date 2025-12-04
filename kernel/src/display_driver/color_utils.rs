@@ -1,7 +1,7 @@
 use bootloader_api::info::PixelFormat;
 use crate::tools::digit_count;
 
-pub fn color_to_pixel_bytes(hex: u32, format: PixelFormat) -> Option<[u8; 4]> {
+pub fn color_to_bytes(hex: u32, format: PixelFormat) -> Option<[u8; 4]> {
     let hex_length = digit_count(hex as u64);
     if hex_length != 6 && hex_length != 8  {
         return None;
