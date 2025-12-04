@@ -3,6 +3,7 @@
 
 mod heap;
 mod display_driver;
+mod tools;
 
 use core::panic::PanicInfo;
 use bootloader_api::{entry_point, BootInfo};

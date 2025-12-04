@@ -21,6 +21,4 @@ impl Screen {
             pixel_format,
         }
     }
-
-    
 }
