@@ -41,29 +41,36 @@ impl Screen {
     pub fn write_pixel(&mut self, x: usize, y: usize, hex_color: &str) -> bool {
         let hex = hex_color.trim_start_matches('#');
         let color = u32::from_str_radix(hex, 16).unwrap_or(0);
-        let color_bytes  = color_to_bytes(color, self.pixel_format);
+        let color_bytes = color_to_bytes(color, self.pixel_format);
 
         if let Some(bytes) = color_bytes {
-            let bytes_per_pixel = match self.pixel_format {
-                PixelFormat::U8 => 1,
-                _ => 3,
-            };
-
-            let offset = (y * self.width + x) * bytes_per_pixel;
-
-            if offset + bytes_per_pixel <= self.framebuffer.len() {
-                self.framebuffer[offset..offset+bytes_per_pixel].copy_from_slice(&bytes[..bytes_per_pixel]);
-                return true;
-            }
+            return self.write_to_framebuffer(x, y, &bytes);
         }
-        
-        return false;
+       return false;
+    }
+
+    fn write_to_framebuffer(&mut self, x: usize, y: usize, bytes: &[u8]) -> bool {
+        let bytes_per_pixel = match self.pixel_format {
+            PixelFormat::U8 => 1,
+            _ => 3,
+        };
+        let offset = (y * self.width + x) * bytes_per_pixel;
+        if offset + bytes_per_pixel <= self.framebuffer.len() {
+            self.framebuffer[offset..offset + bytes_per_pixel].copy_from_slice(&bytes[..bytes_per_pixel]);
+            return true;
+        } else {
+            return false;
+        }
     }
 
     pub fn clear_screen(&mut self, hex_color: &str) {
-        for y in 0..self.height {
-            for x in 0..self.width {
-                self.write_pixel(x, y, hex_color);
+        let hex = hex_color.trim_start_matches('#');
+        let color = u32::from_str_radix(hex, 16).unwrap_or(0);
+        if let Some(bytes) = color_to_bytes(color, self.pixel_format) {
+            for y in 0..self.height {
+                for x in 0..self.width {
+                    self.write_to_framebuffer(x, y, &bytes);
+                }
             }
         }
     }
