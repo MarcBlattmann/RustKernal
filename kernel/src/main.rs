@@ -19,7 +19,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     init_heap();
     let mut screen = init_screen(boot_info);
 
-    screen.clear_screen("#343434ff");
+    screen.clear_screen("#15ff00ff");
 
     screen.draw_bitmap(30, 30, &Bitmap {
         width: 24,
