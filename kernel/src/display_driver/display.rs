@@ -69,17 +69,17 @@ impl Screen {
     }
 
     pub fn draw_bitmap(&mut self, x: usize, y: usize, bitmap: &Bitmap) {
-    for row in 0..bitmap.height {
-        for col in 0..bitmap.width {
-            let screen_x = x + col;
-            let screen_y = y + row;
-            if screen_x < self.width && screen_y < self.height {
-                let pixel_index = row * bitmap.width + col;
-                let color = bitmap.pixels[pixel_index];
-                let hex_color = format!("{:06x}", color);
-                self.write_pixel(screen_x, screen_y, &hex_color);
+        for row in 0..bitmap.height {
+            for col in 0..bitmap.width {
+                let screen_x = x + col;
+                let screen_y = y + row;
+                if screen_x < self.width && screen_y < self.height {
+                    let pixel_index = row * bitmap.width + col;
+                    let color = bitmap.pixels[pixel_index];
+                    let hex_color = format!("{:06x}", color);
+                    self.write_pixel(screen_x, screen_y, &hex_color);
+                }
             }
         }
     }
-}
 }
