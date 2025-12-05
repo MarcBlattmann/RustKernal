@@ -37,20 +37,16 @@ impl Screen {
         }
     }
 
-    pub fn write_pixel(&mut self, x: usize, y: usize, color: u32) -> bool {
-        let alpha = (color >> 24) & 0xFF;
-        
-        if alpha == 0 {
-            return true;
-        }
-        
-        let rgb = color & 0x00FFFFFF;
-        let color_bytes = color_to_bytes(rgb, self.pixel_format);
+    pub fn write_pixel(&mut self, x: usize, y: usize, color: u32) -> bool {        
+        let color_bytes = color_to_bytes(color, self.pixel_format);
 
         if let Some(bytes) = color_bytes {
+            if bytes[3] == 0 {
+                return true;
+            }
             return self.write_to_framebuffer(x, y, &bytes);
         }
-       return false;
+        return false;
     }
 
     fn write_to_framebuffer(&mut self, x: usize, y: usize, bytes: &[u8]) -> bool {
@@ -67,10 +63,7 @@ impl Screen {
         }
     }
 
-    pub fn clear_screen(&mut self, hex_color: &str) {
-        let hex = hex_color.trim_start_matches('#');
-        let color = u32::from_str_radix(hex, 16).unwrap_or(0);
-        
+    pub fn clear_screen(&mut self, color: u32) {        
         for y in 0..self.height {
             for x in 0..self.width {
                 self.write_pixel(x, y, color);

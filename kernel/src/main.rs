@@ -20,7 +20,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     init_heap();
     let mut screen = init_screen(boot_info);
 
-    screen.clear_screen("#202020ff");
+    screen.clear_screen(0xFFFF1D00);
     screen.draw_bitmap(30, 30, &get_house_icon());
 
     loop {
