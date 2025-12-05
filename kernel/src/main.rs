@@ -11,6 +11,7 @@ use alloc::vec;
 use bootloader_api::{entry_point, BootInfo};
 use heap::init_heap;
 use display_driver::display::init_screen;
+use display_driver::bitmap::Bitmap;
 
 entry_point!(kernel_main);
 
@@ -20,7 +21,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     screen.clear_screen("#343434ff");
 
-    screen.draw_bitmap(30, 30, &display_driver::bitmap::Bitmap {
+    screen.draw_bitmap(30, 30, &Bitmap {
         width: 24,
         height: 24,
         pixels: vec![

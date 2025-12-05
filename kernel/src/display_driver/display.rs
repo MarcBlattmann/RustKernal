@@ -1,4 +1,5 @@
 use crate::display_driver::color_utils::color_to_bytes;
+use alloc::format;
 use crate::display_driver::bitmap::Bitmap;
 use bootloader_api::info::PixelFormat;
 use bootloader_api::{BootInfo};
@@ -68,26 +69,17 @@ impl Screen {
     }
 
     pub fn draw_bitmap(&mut self, x: usize, y: usize, bitmap: &Bitmap) {
-        for row in 0..bitmap.height {
-            for col in 0..bitmap.width {
-                let screen_x = x + col;
-                let screen_y = y + row;
-                if screen_x < self.width && screen_y < self.height {
-                    let pixel_index = row * bitmap.width + col;
-                    let color = bitmap.pixels[pixel_index];
-                    if let Some(bytes) = color_to_bytes(color, self.pixel_format) {
-                        let bytes_per_pixel = match self.pixel_format {
-                            PixelFormat::U8 => 1,
-                            _ => 3,
-                        };
-                        let offset = (screen_y * self.width + screen_x) * bytes_per_pixel;
-                        if offset + bytes_per_pixel <= self.framebuffer.len() {
-                            self.framebuffer[offset..offset+bytes_per_pixel]
-                                .copy_from_slice(&bytes[..bytes_per_pixel]);
-                        }
-                    }
-                }
+    for row in 0..bitmap.height {
+        for col in 0..bitmap.width {
+            let screen_x = x + col;
+            let screen_y = y + row;
+            if screen_x < self.width && screen_y < self.height {
+                let pixel_index = row * bitmap.width + col;
+                let color = bitmap.pixels[pixel_index];
+                let hex_color = format!("{:06x}", color);
+                self.write_pixel(screen_x, screen_y, &hex_color);
             }
         }
     }
+}
 }
