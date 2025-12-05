@@ -36,7 +36,7 @@ impl Screen {
         }
     }
 
-    pub fn write_pixel(&mut self, x: usize, y: usize, hex_color: &str) {
+    pub fn write_pixel(&mut self, x: usize, y: usize, hex_color: &str) -> bool {
         let hex = hex_color.trim_start_matches('#');
         let color = u32::from_str_radix(hex, 16).unwrap_or(0);
         let color_bytes  = color_to_bytes(color, self.pixel_format);
@@ -51,8 +51,11 @@ impl Screen {
 
             if offset + bytes_per_pixel <= self.framebuffer.len() {
                 self.framebuffer[offset..offset+bytes_per_pixel].copy_from_slice(&bytes[..bytes_per_pixel]);
+                return true;
             }
         }
+        
+        return false;
     }
 
     pub fn clear_screen(&mut self, hex_color: &str) {
