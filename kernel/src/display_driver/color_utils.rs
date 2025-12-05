@@ -2,9 +2,9 @@ use bootloader_api::info::PixelFormat;
 
 pub fn color_to_bytes(hex: u32, format: PixelFormat) -> Option<[u8; 4]> {
 
-    let red = ((hex >> 16) & 0xFF) as u8;
-    let green = ((hex >> 8) & 0xFF) as u8;
-    let blue = (hex & 0xFF) as u8;
+    let red = (hex >> 16) as u8;
+    let green = (hex >> 8) as u8;
+    let blue = (hex) as u8;
 
     match format {
         PixelFormat::Rgb => Some([red, green, blue, 0]),
