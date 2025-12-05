@@ -14,9 +14,9 @@ pub fn color_to_bytes(hex: u32, format: PixelFormat) -> Option<[u8; 4]> {
             return Some([gray, 0, 0, 0]);
         },
         PixelFormat::Unknown { red_position, green_position, blue_position } => {
-            let r = ((hex >> red_position) & 0xFF) as u8;
-            let g = ((hex >> green_position) & 0xFF) as u8;
-            let b = ((hex >> blue_position) & 0xFF) as u8;
+            let r = (hex >> red_position) as u8;
+            let g = (hex >> green_position) as u8;
+            let b = (hex >> blue_position) as u8;
             return Some([r, g, b, 0]);
         },
         _ => Some([red, green, blue, 0]),
