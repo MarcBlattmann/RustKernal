@@ -1,5 +1,4 @@
 use crate::display_driver::color_utils::color_to_bytes;
-use alloc::format;
 use crate::display_driver::bitmap::Bitmap;
 use bootloader_api::info::PixelFormat;
 use bootloader_api::{BootInfo};
@@ -38,10 +37,15 @@ impl Screen {
         }
     }
 
-    pub fn write_pixel(&mut self, x: usize, y: usize, hex_color: &str) -> bool {
-        let hex = hex_color.trim_start_matches('#');
-        let color = u32::from_str_radix(hex, 16).unwrap_or(0);
-        let color_bytes = color_to_bytes(color, self.pixel_format);
+    pub fn write_pixel(&mut self, x: usize, y: usize, color: u32) -> bool {
+        let alpha = (color >> 24) & 0xFF;
+        
+        if alpha == 0 {
+            return true;
+        }
+        
+        let rgb = color & 0x00FFFFFF;
+        let color_bytes = color_to_bytes(rgb, self.pixel_format);
 
         if let Some(bytes) = color_bytes {
             return self.write_to_framebuffer(x, y, &bytes);
@@ -66,11 +70,10 @@ impl Screen {
     pub fn clear_screen(&mut self, hex_color: &str) {
         let hex = hex_color.trim_start_matches('#');
         let color = u32::from_str_radix(hex, 16).unwrap_or(0);
-        if let Some(bytes) = color_to_bytes(color, self.pixel_format) {
-            for y in 0..self.height {
-                for x in 0..self.width {
-                    self.write_to_framebuffer(x, y, &bytes);
-                }
+        
+        for y in 0..self.height {
+            for x in 0..self.width {
+                self.write_pixel(x, y, color);
             }
         }
     }
@@ -82,9 +85,8 @@ impl Screen {
                 let screen_y = y + row;
                 if screen_x < self.width && screen_y < self.height {
                     let pixel_index = row * bitmap.width + col;
-                    let color = bitmap.pixels[pixel_index];
-                    let hex_color = format!("{:06x}", color);
-                    self.write_pixel(screen_x, screen_y, &hex_color);
+                    let pixel = bitmap.pixels[pixel_index];
+                    self.write_pixel(screen_x, screen_y, pixel);
                 }
             }
         }
