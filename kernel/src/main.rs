@@ -3,7 +3,6 @@
 
 mod heap;
 mod display_driver;
-mod tools;
 
 use core::panic::PanicInfo;
 use bootloader_api::{entry_point, BootInfo};
@@ -16,6 +15,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     init_heap();
     let mut screen = init_screen(boot_info);
 
+    screen.clear_screen("#59c5ffff");
     screen.write_pixel(10, 10, "#ff5634");
 
     loop {
