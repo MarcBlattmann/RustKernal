@@ -9,6 +9,8 @@ pub fn init_screen(boot_info: &'static mut BootInfo) -> Screen {
     let display = Screen::new(
         info.width,
         info.height,
+        info.bytes_per_pixel,
+        info.stride,
         framebuffer.buffer_mut(),
         info.pixel_format,
     );
@@ -19,6 +21,8 @@ pub fn init_screen(boot_info: &'static mut BootInfo) -> Screen {
 pub struct Screen {
     pub width: usize,
     pub height: usize,
+    pub bytes_per_pixel: usize,
+    pub stride: usize,
     pub framebuffer: &'static mut [u8],
     pub pixel_format: PixelFormat,
 }
@@ -27,12 +31,16 @@ impl Screen {
     pub fn new(
         width: usize,
         height: usize,
+        bytes_per_pixel: usize,
+        stride: usize,
         framebuffer: &'static mut [u8],
         pixel_format: PixelFormat,
     ) -> Self {
         Self {
             width,
             height,
+            bytes_per_pixel,
+            stride,
             framebuffer,
             pixel_format,
         }
@@ -51,13 +59,9 @@ impl Screen {
     }
 
     fn write_to_framebuffer(&mut self, x: usize, y: usize, bytes: &[u8]) -> bool {
-        let bytes_per_pixel = match self.pixel_format {
-            PixelFormat::U8 => 1,
-            _ => 3,
-        };
-        let offset = (y * self.width + x) * bytes_per_pixel;
-        if offset + bytes_per_pixel <= self.framebuffer.len() {
-            self.framebuffer[offset..offset + bytes_per_pixel].copy_from_slice(&bytes[..bytes_per_pixel]);
+        let offset = (y * self.stride + x) * self.bytes_per_pixel;
+        if offset + self.bytes_per_pixel <= self.framebuffer.len() {
+            self.framebuffer[offset..offset + self.bytes_per_pixel].copy_from_slice(&bytes[..self.bytes_per_pixel]);
             return true;
         } else {
             return false;

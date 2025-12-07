@@ -23,6 +23,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     screen.clear_screen(0x454545);
     screen.draw_bitmap(30, 30, &get_house_icon());
 
+    screen.draw_bitmap(40, 40, &get_house_icon());
+
     loop {
         core::hint::spin_loop();
     }
