@@ -83,8 +83,9 @@ impl Screen {
                 let screen_y = y + row;
                 if screen_x < self.width && screen_y < self.height {
                     let pixel_index = row * bitmap.width + col;
-                    let pixel = bitmap.pixels[pixel_index];
-                    self.write_pixel(screen_x, screen_y, pixel);
+                    if let Some(&pixel) = bitmap.pixels.get(pixel_index) {
+                        self.write_pixel(screen_x, screen_y, pixel);
+                    }
                 }
             }
         }
