@@ -4,6 +4,7 @@
 mod heap;
 mod display_driver;
 mod utils;
+mod console;
 
 extern crate alloc;
 
