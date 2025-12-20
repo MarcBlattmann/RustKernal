@@ -7,6 +7,8 @@ To build you need
 -> rustup target add x86_64-unknown-none
 -> rustup component add llvm-tools-preview
 
+To run you need 
+-> quemu
 ___
 
 ### Run the kernal in qemu
