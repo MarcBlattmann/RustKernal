@@ -12,8 +12,7 @@ use core::panic::PanicInfo;
 use bootloader_api::{entry_point, BootInfo};
 use heap::init_heap;
 use display_driver::display::init_screen;
-use display_driver::bitmap::Bitmap;
-use utils::icons::house::get_house_icon;
+use console::Console;
 
 entry_point!(kernel_main);
 
@@ -21,9 +20,10 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     init_heap();
     let mut screen = init_screen(boot_info);
 
-    screen.clear_screen(0x454545);
-    screen.draw_bitmap(30, 30, &get_house_icon());
-    screen.draw_bitmap(60, 30, &get_house_icon());
+    screen.clear_screen(0xFF000000);
+    let mut console = Console::new(screen);
+
+    console.print("Hello world from Rust kernel!");
 
     loop {
         core::hint::spin_loop();

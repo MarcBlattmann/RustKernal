@@ -1,4 +1,4 @@
-use super::super::super::Bitmap;
+use crate::display_driver::bitmap::Bitmap;
 
 pub fn get_house_icon() -> Bitmap {
     return Bitmap {
