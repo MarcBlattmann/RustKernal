@@ -23,7 +23,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     screen.clear_screen(0xFF000000);
     let mut console = Console::new(screen);
 
-    console.print("Hello world from Rust kernel!");
+    console.print("Hello world from the kernel");
 
     loop {
         core::hint::spin_loop();
