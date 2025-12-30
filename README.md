@@ -1,4 +1,4 @@
-# Rust kernal
+# Rust kernal 
 
 ___
 
@@ -7,7 +7,7 @@ To build you need :
 >-> https://visualstudio.microsoft.com/visual-cpp-build-tools/
 >
 >-> rustup target add x86_64-unknown-none
->
+>z
 >-> rustup component add llvm-tools-preview
 
 To run you need :
