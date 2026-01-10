@@ -6,8 +6,7 @@ mod heap;
 mod display_driver;
 mod utils;
 mod console;
-mod gdt;
-mod idt;
+mod interrupts;
 
 extern crate alloc;
 
@@ -20,8 +19,7 @@ use console::Console;
 entry_point!(kernel_main);
 
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
-    gdt::init();
-    idt::init();
+    interrupts::init();
     init_heap();
 
     let mut screen = init_screen(boot_info);
@@ -29,10 +27,17 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     screen.clear_screen(0xFF000000);
     let mut console = Console::new(screen);
 
-    console.print("Hello world from the kernel");
+    console.print("Hello world from the kernel\n");
 
     loop {
-        core::hint::spin_loop();
+        let tick_count = interrupts::idt::ticks();
+        console.print("Current Ticks: ");
+        console.print(&alloc::format!("{}\n", tick_count));
+        
+        // Wait ~1 second (rough estimate: 10 million loops)
+        for _ in 0..10_000_000 {
+            core::hint::spin_loop();
+        }
     }
 }
 
