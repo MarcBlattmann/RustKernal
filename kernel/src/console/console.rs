@@ -72,7 +72,7 @@ fn get_char_bitmap(c: char) -> [u8; 8] {
 
 impl Console {
     pub fn new(screen: Screen) -> Self {
-        let mut console = Console { 
+        let console = Console { 
             screen,
             cursor_x: 0,
             cursor_y: 0,

@@ -5,6 +5,7 @@ mod heap;
 mod display_driver;
 mod utils;
 mod console;
+mod gdt;
 
 extern crate alloc;
 
@@ -17,7 +18,9 @@ use console::Console;
 entry_point!(kernel_main);
 
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
+    gdt::init();
     init_heap();
+    
     let mut screen = init_screen(boot_info);
 
     screen.clear_screen(0xFF000000);
