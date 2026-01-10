@@ -13,7 +13,7 @@ const SLAVE_PIC_VECTOR_OFFSET: u8 = 40;
 const SLAVE_ON_IRQ2_FOR_MASTER: u8 = 4;
 const SLAVE_CASCADE_IDENTITY: u8 = 2;
 
-const MASK_ALL_EXCEPT_TIMER: u8 = 0xFE;
+const MASK_TIMER_AND_KEYBOARD_ENABLED: u8 = 0xFC;
 const MASK_ALL: u8 = 0xFF;
 
 unsafe fn wait_for_io_operation() {
@@ -48,7 +48,7 @@ pub fn init() {
         write_to_port(SLAVE_PIC_DATA_PORT, MODE_8086);
         wait_for_io_operation();
         
-        write_to_port(MASTER_PIC_DATA_PORT, MASK_ALL_EXCEPT_TIMER);
+        write_to_port(MASTER_PIC_DATA_PORT, MASK_TIMER_AND_KEYBOARD_ENABLED);
         write_to_port(SLAVE_PIC_DATA_PORT, MASK_ALL);
         wait_for_io_operation();
     }

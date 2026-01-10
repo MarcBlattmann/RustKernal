@@ -2,24 +2,25 @@
 #![no_std]
 #![no_main]
 
-mod heap;
-mod display_driver;
+mod memory;
+mod cpu;
+mod drivers;
+mod shell;
 mod utils;
-mod console;
-mod interrupts;
 
 extern crate alloc;
 
 use core::panic::PanicInfo;
 use bootloader_api::{entry_point, BootInfo};
-use heap::init_heap;
-use display_driver::display::init_screen;
-use console::Console;
+use memory::init_heap;
+use drivers::display::init_screen;
+use shell::Console;
 
 entry_point!(kernel_main);
 
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
-    interrupts::init();
+    cpu::init();
+    drivers::init();
     init_heap();
 
     let mut screen = init_screen(boot_info);
@@ -27,17 +28,18 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     screen.clear_screen(0xFF000000);
     let mut console = Console::new(screen);
 
-    console.print("Hello world from the kernel\n");
+    console.print("Welcome to the rust kernel\n");
+    console.print("> ");
 
     loop {
-        let tick_count = interrupts::idt::ticks();
-        console.print("Current Ticks: ");
-        console.print(&alloc::format!("{}\n", tick_count));
-        
-        // Wait ~1 second (rough estimate: 10 million loops)
-        for _ in 0..10_000_000 {
-            core::hint::spin_loop();
+        if let Some(character) = drivers::keyboard::try_read_char() {
+            if character == '\n' {
+                console.print("\n> ");
+            } else {
+                console.print(&alloc::format!("{}", character));
+            }
         }
+        core::hint::spin_loop();
     }
 }
 

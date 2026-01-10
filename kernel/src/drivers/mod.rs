@@ -1,12 +1,10 @@
-pub mod gdt;
-pub mod idt;
 pub mod pic;
+pub mod apic;
 pub mod timer;
-mod apic;
+pub mod keyboard;
+pub mod display;
 
 pub fn init() {
-    gdt::init();
-    idt::init();
     pic::init();
     timer::init();
 }

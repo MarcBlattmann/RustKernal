@@ -1,12 +1,10 @@
 use x86_64::structures::idt::{InterruptDescriptorTable, InterruptStackFrame};
-use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Lazy;
 use super::gdt;
-use super::pic;
+use crate::drivers::{pic, keyboard};
 
 const TIMER_INTERRUPT_VECTOR: usize = 32;
-
-static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);
+const KEYBOARD_INTERRUPT_VECTOR: usize = 33;
 
 static INTERRUPT_DESCRIPTOR_TABLE: Lazy<InterruptDescriptorTable> = Lazy::new(|| {
     let mut idt = InterruptDescriptorTable::new();
@@ -18,6 +16,7 @@ static INTERRUPT_DESCRIPTOR_TABLE: Lazy<InterruptDescriptorTable> = Lazy::new(||
     }
 
     idt[TIMER_INTERRUPT_VECTOR].set_handler_fn(handle_timer_interrupt);
+    idt[KEYBOARD_INTERRUPT_VECTOR].set_handler_fn(handle_keyboard_interrupt);
 
     idt
 });
@@ -27,14 +26,16 @@ extern "x86-interrupt" fn handle_double_fault(stack_frame: InterruptStackFrame, 
 }
 
 extern "x86-interrupt" fn handle_timer_interrupt(_stack_frame: InterruptStackFrame) {
-    TIMER_TICKS.fetch_add(1, Ordering::Relaxed);
+    crate::drivers::timer::tick();
     pic::send_eoi(0);
+}
+
+extern "x86-interrupt" fn handle_keyboard_interrupt(_stack_frame: InterruptStackFrame) {
+    let scancode = keyboard::read_scancode();
+    keyboard::handle_scancode(scancode);
+    pic::send_eoi(1);
 }
 
 pub fn init() {
     INTERRUPT_DESCRIPTOR_TABLE.load();
-}
-
-pub fn ticks() -> u64 {
-    TIMER_TICKS.load(Ordering::SeqCst)
 }

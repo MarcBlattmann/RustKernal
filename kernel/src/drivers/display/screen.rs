@@ -1,7 +1,7 @@
-use crate::display_driver::color_utils::color_to_bytes;
-use crate::display_driver::bitmap::Bitmap;
+use super::color_utils::color_to_bytes;
+use super::bitmap::Bitmap;
 use bootloader_api::info::PixelFormat;
-use bootloader_api::{BootInfo};
+use bootloader_api::BootInfo;
 
 pub fn init_screen(boot_info: &'static mut BootInfo) -> Screen {
     let framebuffer = boot_info.framebuffer.as_mut().expect("No framebuffer found");

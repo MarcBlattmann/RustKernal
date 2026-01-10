@@ -1,8 +1,12 @@
+use core::sync::atomic::{AtomicU64, Ordering};
+
 const TIMER_DATA_PORT: u16 = 0x40;
 const TIMER_COMMAND_PORT: u16 = 0x43;
 
 const CHANNEL_0_RATE_GENERATOR_BINARY: u8 = 0x34;
 const MAX_FREQUENCY_DIVIDER: u16 = 65535;
+
+static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);
 
 unsafe fn write_to_port(port: u16, value: u8) {
     unsafe {
@@ -21,4 +25,12 @@ pub fn init() {
         write_to_port(TIMER_DATA_PORT, low_byte);
         write_to_port(TIMER_DATA_PORT, high_byte);
     }
+}
+
+pub fn tick() {
+    TIMER_TICKS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn ticks() -> u64 {
+    TIMER_TICKS.load(Ordering::SeqCst)
 }
