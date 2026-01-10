@@ -106,12 +106,20 @@ impl Console {
         if c == '\n' {
             self.cursor_x = 0;
             self.cursor_y += FONT_HEIGHT + 2;
+            
+            if self.cursor_y + FONT_HEIGHT > self.screen.height {
+                self.scroll_up();
+            }
             return;
         }
 
         if self.cursor_x + FONT_WIDTH > self.screen.width {
             self.cursor_x = 0;
             self.cursor_y += FONT_HEIGHT + 2;
+            
+            if self.cursor_y + FONT_HEIGHT > self.screen.height {
+                self.scroll_up();
+            }
         }
 
         let bitmap = get_char_bitmap(c);
@@ -130,5 +138,22 @@ impl Console {
         }
 
         self.cursor_x += FONT_WIDTH;
+    }
+
+    fn scroll_up(&mut self) {
+        let scroll_distance = FONT_HEIGHT + 2;
+        let scroll_bytes = scroll_distance * self.screen.stride * self.screen.bytes_per_pixel;
+        
+        if scroll_bytes <= self.screen.framebuffer.len() {
+            for i in 0..(self.screen.framebuffer.len() - scroll_bytes) {
+                self.screen.framebuffer[i] = self.screen.framebuffer[i + scroll_bytes];
+            }
+            
+            for i in (self.screen.framebuffer.len() - scroll_bytes)..self.screen.framebuffer.len() {
+                self.screen.framebuffer[i] = 0x00;
+            }
+        }
+        
+        self.cursor_y = self.cursor_y.saturating_sub(scroll_distance);
     }
 }
