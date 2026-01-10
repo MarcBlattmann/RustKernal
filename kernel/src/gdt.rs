@@ -10,10 +10,10 @@ static TSS: Lazy<TaskStateSegment> = Lazy::new(|| {
     
     // Create the main kernel stack (for normal interrupt entry).
     const STACK_SIZE: usize = 4096 * 5;  // 20 KB
-    static mut KERNEL_STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
+    static KERNEL_STACK: [u8; STACK_SIZE] = [0; STACK_SIZE];
     
     // Get the top of the main kernel stack (stacks grow downward).
-    let stack_start = VirtAddr::from_ptr(unsafe { &raw const KERNEL_STACK });
+    let stack_start = VirtAddr::from_ptr(&raw const KERNEL_STACK);
     let stack_end = stack_start + STACK_SIZE;
     
     // Set the privileged stack pointer (used when switching from user → kernel).
@@ -21,10 +21,10 @@ static TSS: Lazy<TaskStateSegment> = Lazy::new(|| {
     
     // Create a SEPARATE double-fault stack (emergency stack).
     const DOUBLE_FAULT_STACK_SIZE: usize = 4096 * 5;  // 20 KB
-    static mut DOUBLE_FAULT_STACK: [u8; DOUBLE_FAULT_STACK_SIZE] = [0; DOUBLE_FAULT_STACK_SIZE];
+    static DOUBLE_FAULT_STACK: [u8; DOUBLE_FAULT_STACK_SIZE] = [0; DOUBLE_FAULT_STACK_SIZE];
     
     // Get the top of the double-fault stack.
-    let double_fault_stack_start = VirtAddr::from_ptr(unsafe { &raw const DOUBLE_FAULT_STACK });
+    let double_fault_stack_start = VirtAddr::from_ptr(&raw const DOUBLE_FAULT_STACK);
     let double_fault_stack_end = double_fault_stack_start + DOUBLE_FAULT_STACK_SIZE;
     
     // Set IST[0] to the SEPARATE double-fault stack (its own safe memory).
