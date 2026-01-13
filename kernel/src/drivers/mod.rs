@@ -5,12 +5,13 @@ pub mod keyboard;
 pub mod display;
 pub mod filesystem;
 pub mod ata;
+pub mod drives;
 
 pub fn init() {
     pic::init();
     timer::init();
     
     if ata::init().is_ok() {
-        let _ = filesystem::init();
+        let _ = drives::init();  // Initialize multi-drive support
     }
 }

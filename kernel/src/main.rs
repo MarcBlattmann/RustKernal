@@ -21,8 +21,8 @@ entry_point!(kernel_main);
 
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     cpu::init();
+    init_heap();  // Must be before drivers::init() for Vec allocations
     drivers::init();
-    init_heap();
 
     let mut screen = init_screen(boot_info);
     screen.clear_screen(0xFF000000);

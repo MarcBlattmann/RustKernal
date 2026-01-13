@@ -81,6 +81,18 @@ fn scancode_to_char(scancode: u8) -> Option<u8> {
         0x2C => b'y', 0x2D => b'x', 0x2E => b'c', 0x2F => b'v', 0x30 => b'b',
         0x31 => b'n', 0x32 => b'm',
         
+        // Punctuation - Swiss keyboard
+        0x33 => b',',  // Comma
+        0x34 => b'.',  // Period
+        0x35 => b'-',  // Minus/Hyphen (next to right shift)
+        0x0C => b'\'', // Apostrophe (on number row)
+        0x27 => b';',  // Semicolon area (ö on Swiss)
+        0x28 => b':', // Colon area (ä on Swiss)
+        0x29 => b'`',  // Backtick (grave)
+        0x1A => b'[',  // Left bracket area
+        0x1B => b']',  // Right bracket area
+        0x2B => b'\\', // Backslash
+        
         0x39 => b' ',  // Space
         0x1C => b'\n', // Enter
         0x0E => 0x08,  // Backspace (ASCII backspace)
