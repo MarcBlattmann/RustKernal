@@ -14,7 +14,7 @@ use core::panic::PanicInfo;
 use bootloader_api::{entry_point, BootInfo};
 use memory::init_heap;
 use drivers::display::init_screen;
-use shell::{Console, handle_command};
+use shell::{Console, Shell, handle_command};
 use alloc::string::String;
 
 entry_point!(kernel_main);
@@ -28,9 +28,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     screen.clear_screen(0xFF000000);
     
     let mut console = Console::new(screen);
+    let mut shell = Shell::new();
+    
     console.print("Welcome to the rust kernel\n");
     console.print("Type 'help' for commands\n");
-    console.print("> ");
+    console.print(&alloc::format!("{}> ", shell.get_prompt()));
 
     let mut input = String::new();
 
@@ -39,9 +41,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
             match c {
                 '\n' => {
                     console.print("\n");
-                    handle_command(&input, &mut console);
+                    handle_command(&input, &mut console, &mut shell);
                     input.clear();
-                    console.print("> ");
+                    console.print(&alloc::format!("{}> ", shell.get_prompt()));
                 }
                 '\u{0008}' => {
                     if !input.is_empty() {

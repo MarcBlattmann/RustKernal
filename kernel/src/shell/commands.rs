@@ -2,11 +2,11 @@
 
 use crate::drivers;
 use crate::drivers::filesystem::FILESYSTEM;
-use super::Console;
+use super::{Console, Shell};
 use alloc::string::String;
 use alloc::vec::Vec;
 
-pub fn handle_command(input: &str, console: &mut Console) {
+pub fn handle_command(input: &str, console: &mut Console, shell: &mut Shell) {
     let parts: Vec<&str> = input.split(' ').collect();
     
     if parts.is_empty() || parts[0].is_empty() {
@@ -15,12 +15,14 @@ pub fn handle_command(input: &str, console: &mut Console) {
 
     match parts[0] {
         "help" => cmd_help(console),
-        "ls" => cmd_ls(console),
-        "mkdir" => cmd_mkdir(&parts, console),
-        "save" => cmd_save(&parts, console),
-        "cat" => cmd_cat(&parts, console),
-        "rm" => cmd_rm(&parts, console),
-        "stat" => cmd_stat(&parts, console),
+        "ls" => cmd_ls(console, shell),
+        "cd" => cmd_cd(&parts, console, shell),
+        "pwd" => cmd_pwd(console, shell),
+        "mkdir" => cmd_mkdir(&parts, console, shell),
+        "save" => cmd_save(&parts, console, shell),
+        "cat" => cmd_cat(&parts, console, shell),
+        "rm" => cmd_rm(&parts, console, shell),
+        "stat" => cmd_stat(&parts, console, shell),
         "df" => cmd_df(console),
         "disk" => cmd_disk(&parts, console),
         "clear" => cmd_clear(console),
@@ -29,8 +31,12 @@ pub fn handle_command(input: &str, console: &mut Console) {
 }
 
 fn cmd_help(console: &mut Console) {
-    console.print("--- FILE SYSTEM ---\n");
+    console.print("--- NAVIGATION ---\n");
+    console.print("  cd <dir>     - Change directory\n");
+    console.print("  cd ..        - Go up one level\n");
+    console.print("  pwd          - Print current path\n");
     console.print("  ls           - List files\n");
+    console.print("\n--- FILE SYSTEM ---\n");
     console.print("  save <name>  - Create/save file\n");
     console.print("  cat <name>   - Show file content\n");
     console.print("  mkdir <name> - Create directory\n");
@@ -38,38 +44,81 @@ fn cmd_help(console: &mut Console) {
     console.print("  stat <name>  - Show file info\n");
     console.print("  df           - Show disk usage\n");
     console.print("\n--- DISK ---\n");
-    console.print("  disk list    - List detected drives\n");
-    console.print("  disk info    - Show active disk info\n");
-    console.print("  disk read <sector> - Read sector\n");
+    console.print("  disk list    - List drives\n");
+    console.print("  disk info    - Disk info\n");
     console.print("  disk format  - Format filesystem\n");
     console.print("\n--- SYSTEM ---\n");
     console.print("  clear        - Clear screen\n");
     console.print("  help         - Show this help\n");
-    console.print("\n-------------\n");
 }
 
-fn cmd_ls(console: &mut Console) {
-    let fs = FILESYSTEM.lock();
-    let files = fs.list_files();
-    if files.is_empty() {
-        console.print("(empty)\n");
-    } else {
-        for (name, is_dir) in files {
-            if is_dir {
-                console.print(&alloc::format!("[DIR] {}\n", name));
-            } else {
-                console.print(&alloc::format!("      {}\n", name));
-            }
-        }
+fn cmd_cd(parts: &[&str], console: &mut Console, shell: &mut Shell) {
+    if parts.len() < 2 {
+        console.print("Usage: cd <directory>\n");
+        return;
+    }
+    
+    if !shell.cd(parts[1]) {
+        console.print("Directory not found\n");
     }
 }
 
-fn cmd_mkdir(parts: &[&str], console: &mut Console) {
+fn cmd_pwd(console: &mut Console, shell: &Shell) {
+    console.print(&alloc::format!("/{}\n", shell.get_prompt()));
+}
+
+fn cmd_ls(console: &mut Console, shell: &Shell) {
+    let fs = FILESYSTEM.lock();
+    let files = fs.list_files();
+    let current_prefix = if shell.current_path.is_empty() {
+        String::new()
+    } else {
+        alloc::format!("{}/", shell.current_path.join("/"))
+    };
+    
+    let mut found = false;
+    
+    if !shell.current_path.is_empty() {
+        console.print("[Dir] ..\n");
+    }
+    
+    for (name, is_dir) in files {
+        if shell.current_path.is_empty() {
+            if !name.contains('/') {
+                found = true;
+                if is_dir {
+                    console.print(&alloc::format!("[Dir] {}\n", name));
+                } else {
+                    console.print(&alloc::format!("[Txt] {}\n", name));
+                }
+            }
+        } else {
+            if name.starts_with(&current_prefix) {
+                let rel_name = &name[current_prefix.len()..];
+                if !rel_name.contains('/') {
+                    found = true;
+                    if is_dir {
+                        console.print(&alloc::format!("[Dir] {}\n", rel_name));
+                    } else {
+                        console.print(&alloc::format!("[Txt] {}\n", rel_name));
+                    }
+                }
+            }
+        }
+    }
+    
+    if !found && shell.current_path.is_empty() {
+        console.print("(empty)\n");
+    }
+}
+
+fn cmd_mkdir(parts: &[&str], console: &mut Console, shell: &Shell) {
     if parts.len() < 2 {
         console.print("Usage: mkdir <name>\n");
     } else {
+        let full_path = shell.full_path(parts[1]);
         let mut fs = FILESYSTEM.lock();
-        if fs.create_directory(String::from(parts[1])) {
+        if fs.create_directory(full_path) {
             console.print("Directory created\n");
         } else {
             console.print("Failed: name already exists\n");
@@ -77,15 +126,15 @@ fn cmd_mkdir(parts: &[&str], console: &mut Console) {
     }
 }
 
-fn cmd_save(parts: &[&str], console: &mut Console) {
+fn cmd_save(parts: &[&str], console: &mut Console, shell: &Shell) {
     if parts.len() < 2 {
         console.print("Usage: save <name>\n");
         return;
     }
     
-    let name = String::from(parts[1]);
+    let full_path = shell.full_path(parts[1]);
     let mut fs = FILESYSTEM.lock();
-    if fs.create_file(name.clone()) {
+    if fs.create_file(full_path.clone()) {
         console.print("Type content (enter twice to finish):\n");
         drop(fs);
         
@@ -119,19 +168,20 @@ fn cmd_save(parts: &[&str], console: &mut Console) {
         }
         
         let mut fs = FILESYSTEM.lock();
-        fs.write_file(&name, content.as_bytes());
+        fs.write_file(&full_path, content.as_bytes());
         console.print("File saved\n");
     } else {
         console.print("Failed: file already exists\n");
     }
 }
 
-fn cmd_cat(parts: &[&str], console: &mut Console) {
+fn cmd_cat(parts: &[&str], console: &mut Console, shell: &Shell) {
     if parts.len() < 2 {
         console.print("Usage: cat <name>\n");
     } else {
+        let full_path = shell.full_path(parts[1]);
         let fs = FILESYSTEM.lock();
-        if let Some(content) = fs.read_file(parts[1]) {
+        if let Some(content) = fs.read_file(&full_path) {
             let text = alloc::string::String::from_utf8_lossy(&content);
             console.print(&text);
             console.print("\n");
@@ -141,12 +191,13 @@ fn cmd_cat(parts: &[&str], console: &mut Console) {
     }
 }
 
-fn cmd_rm(parts: &[&str], console: &mut Console) {
+fn cmd_rm(parts: &[&str], console: &mut Console, shell: &Shell) {
     if parts.len() < 2 {
         console.print("Usage: rm <name>\n");
     } else {
+        let full_path = shell.full_path(parts[1]);
         let mut fs = FILESYSTEM.lock();
-        if fs.delete_file(parts[1]) {
+        if fs.delete_file(&full_path) {
             console.print("Deleted\n");
         } else {
             console.print("Not found\n");
@@ -154,13 +205,15 @@ fn cmd_rm(parts: &[&str], console: &mut Console) {
     }
 }
 
-fn cmd_stat(parts: &[&str], console: &mut Console) {
+fn cmd_stat(parts: &[&str], console: &mut Console, shell: &Shell) {
     if parts.len() < 2 {
         console.print("Usage: stat <name>\n");
     } else {
+        let full_path = shell.full_path(parts[1]);
         let fs = FILESYSTEM.lock();
-        if let Some((size, is_dir)) = fs.get_file_info(parts[1]) {
+        if let Some((size, is_dir)) = fs.get_file_info(&full_path) {
             console.print(&alloc::format!("Name: {}\n", parts[1]));
+            console.print(&alloc::format!("Path: {}\n", full_path));
             console.print(&alloc::format!("Type: {}\n", if is_dir { "Directory" } else { "File" }));
             console.print(&alloc::format!("Size: {} bytes\n", size));
         } else {
@@ -182,7 +235,7 @@ fn cmd_df(console: &mut Console) {
 
 fn cmd_disk(parts: &[&str], console: &mut Console) {
     if parts.len() < 2 {
-        console.print("Usage: disk <info|list|read|format>\n");
+        console.print("Usage: disk <info|list|format>\n");
         return;
     }
     
@@ -202,27 +255,6 @@ fn cmd_disk(parts: &[&str], console: &mut Console) {
                     let size_mb = (sectors as u64 * 512) / (1024 * 1024);
                     console.print(&alloc::format!("  {} - {}MB\n", name, size_mb));
                 }
-            }
-        }
-        "read" => {
-            if parts.len() < 3 {
-                console.print("Usage: disk read <sector>\n");
-                return;
-            }
-            if let Ok(sector) = parts[2].parse::<u32>() {
-                match drivers::ata::AtaDevice::read_sector(sector) {
-                    Ok(data) => {
-                        console.print(&alloc::format!("Sector {}:\n", sector));
-                        for i in 0..64 {
-                            if i % 16 == 0 && i != 0 { console.print("\n"); }
-                            console.print(&alloc::format!("{:02x} ", data[i]));
-                        }
-                        console.print("\n");
-                    }
-                    Err(e) => console.print(&alloc::format!("Error: {}\n", e)),
-                }
-            } else {
-                console.print("Invalid sector number\n");
             }
         }
         "format" => {
