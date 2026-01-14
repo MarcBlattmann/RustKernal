@@ -1,6 +1,0 @@
-<app title="Welcome" width="320" height="220" x="100" y="100">
-    <label x="20" y="30">Welcome to Pursuit OS!</label>
-    <label x="20" y="60">Relentles Persuit</label>
-    <button x="20" y="140" width="100" height="30">Get Started</button>
-    <button x="130" y="140" width="80" height="30">About</button>
-</app>

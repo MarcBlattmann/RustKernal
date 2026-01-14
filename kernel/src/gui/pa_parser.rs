@@ -31,6 +31,7 @@ pub enum ParseError {
     MissingAttribute(&'static str),
     UnknownTag,
     MismatchedClosingTag,
+    NotFound,
 }
 
 /// Simple PA format parser
@@ -458,50 +459,47 @@ macro_rules! include_pa {
 }
 
 // ============================================================
-// App definitions loaded from kernel/apps/ folder at compile time
-// Edit the .pa files directly - they are the source of truth!
+// Auto-generated app definitions from kernel/apps/*.pa
+// Just add .pa files to the apps folder - they're detected automatically!
 // ============================================================
 
-/// Welcome app - loaded from kernel/apps/welcome.pa
-pub const WELCOME_PA: &str = include_str!("../../apps/welcome.pa");
-
-/// About app - loaded from kernel/apps/about.pa
-pub const ABOUT_PA: &str = include_str!("../../apps/about.pa");
-
-/// Settings app - loaded from kernel/apps/settings_flex.pa
-pub const SETTINGS_PA: &str = include_str!("../../apps/settings_flex.pa");
-
-/// Notepad app - loaded from kernel/apps/notepad.pa
-pub const NOTEPAD_PA: &str = include_str!("../../apps/notepad.pa");
-
-/// Calculator app - loaded from kernel/apps/calculator.pa
-pub const CALCULATOR_PA: &str = include_str!("../../apps/calculator.pa");
+// Include the auto-generated app definitions from build.rs
+include!(concat!(env!("OUT_DIR"), "/apps_generated.rs"));
 
 // ============================================================
 // Helper functions to load apps from .pa format
 // ============================================================
 
+/// Load an app by its ID (filename without extension)
+pub fn load_app(id: &str) -> Result<AppDef, ParseError> {
+    if let Some(content) = load_app_by_id(id) {
+        parse_pa(content)
+    } else {
+        Err(ParseError::NotFound)
+    }
+}
+
 /// Load welcome app from .pa format
 pub fn load_welcome_app() -> Result<AppDef, ParseError> {
-    parse_pa(WELCOME_PA)
+    load_app("welcome")
 }
 
 /// Load about app from .pa format
 pub fn load_about_app() -> Result<AppDef, ParseError> {
-    parse_pa(ABOUT_PA)
+    load_app("about")
 }
 
 /// Load settings app from .pa format
 pub fn load_settings_app() -> Result<AppDef, ParseError> {
-    parse_pa(SETTINGS_PA)
+    load_app("settings_flex")
 }
 
 /// Load notepad app from .pa format
 pub fn load_notepad_app() -> Result<AppDef, ParseError> {
-    parse_pa(NOTEPAD_PA)
+    load_app("notepad")
 }
 
 /// Load calculator app from .pa format
 pub fn load_calculator_app() -> Result<AppDef, ParseError> {
-    parse_pa(CALCULATOR_PA)
+    load_app("calculator")
 }

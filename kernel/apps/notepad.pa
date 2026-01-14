@@ -1,8 +1,0 @@
-<app title="Notepad" width="450" height="350" x="150" y="60">
-    <panel x="10" y="30" width="430" height="260"/>
-    <textbox x="15" y="35" width="420" height="250"/>
-    <button x="10" y="300" width="80" height="30">New</button>
-    <button x="100" y="300" width="80" height="30">Open</button>
-    <button x="190" y="300" width="80" height="30">Save</button>
-    <button x="360" y="300" width="80" height="30">Close</button>
-</app>

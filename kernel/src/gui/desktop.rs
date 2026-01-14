@@ -102,19 +102,14 @@ impl Desktop {
     
     /// Launch an app by its ID
     fn launch_app(&mut self, app_id: &str) {
-        use super::pa_parser::*;
+        use super::pa_parser::load_app;
         
-        let app = match app_id {
-            "welcome" => load_welcome_app().ok(),
-            "about" => load_about_app().ok(),
-            "calculator" => load_calculator_app().ok(),
-            "notepad" => load_notepad_app().ok(),
-            "settings" => load_settings_app().ok(),
-            "files" => {
-                // Use the programmatic version
-                Some(super::app::create_file_manager_app())
-            }
-            _ => None,
+        let app = if app_id == "files" {
+            // File Manager is a programmatic app, not from .pa file
+            Some(super::app::create_file_manager_app())
+        } else {
+            // Try to load from auto-detected .pa files
+            load_app(app_id).ok()
         };
         
         if let Some(app) = app {

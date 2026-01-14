@@ -39,14 +39,15 @@ impl StartMenu {
     pub const PADDING: usize = 4;
     
     pub fn new() -> Self {
-        let items = vec![
-            MenuItem::new("Welcome", "welcome"),
-            MenuItem::new("About", "about"),
-            MenuItem::new("Calculator", "calculator"),
-            MenuItem::new("Notepad", "notepad"),
-            MenuItem::new("Settings", "settings"),
-            MenuItem::new("File Manager", "files"),
-        ];
+        // Auto-detect apps from the apps folder
+        use super::pa_parser::get_app_ids;
+        
+        let mut items = Vec::new();
+        for app_id in get_app_ids() {
+            // Create a nice display name from the app_id
+            let name = Self::format_app_name(app_id);
+            items.push(MenuItem::new(&name, app_id));
+        }
         
         let height = items.len() * Self::ITEM_HEIGHT + Self::PADDING * 2;
         
@@ -59,6 +60,26 @@ impl StartMenu {
             items,
             hover_index: None,
         }
+    }
+    
+    /// Format app ID into a nice display name
+    /// e.g., "settings_flex" -> "Settings Flex", "welcome" -> "Welcome"
+    fn format_app_name(app_id: &str) -> String {
+        let mut result = String::new();
+        let mut capitalize_next = true;
+        
+        for c in app_id.chars() {
+            if c == '_' || c == '-' {
+                result.push(' ');
+                capitalize_next = true;
+            } else if capitalize_next {
+                result.push(c.to_ascii_uppercase());
+                capitalize_next = false;
+            } else {
+                result.push(c);
+            }
+        }
+        result
     }
     
     /// Position the menu above the taskbar
