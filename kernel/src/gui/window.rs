@@ -16,6 +16,13 @@ use super::script::{ScriptEngine, ScriptAction};
 /// Maximum number of windows
 const MAX_WINDOWS: usize = 8;
 
+/// Cached position of a rendered label that uses variable interpolation
+#[derive(Clone)]
+struct DynamicLabel {
+    bounds: Rect,
+    text: String, // Original text with {var} placeholders
+}
+
 /// Window structure
 pub struct Window {
     pub id: usize,
@@ -28,6 +35,8 @@ pub struct Window {
     pub original_height: usize,
     /// Script engine for this window
     pub script: ScriptEngine,
+    /// Cached positions of labels with {variables} for partial redraws
+    dynamic_labels: alloc::vec::Vec<DynamicLabel>,
 }
 
 impl Window {
@@ -41,6 +50,7 @@ impl Window {
             original_width: width,
             original_height: height,
             script: ScriptEngine::new(),
+            dynamic_labels: alloc::vec::Vec::new(),
         }
     }
     
@@ -62,6 +72,7 @@ impl Window {
             original_width: app.width,
             original_height: app.height,
             script,
+            dynamic_labels: alloc::vec::Vec::new(),
         }
     }
     
@@ -111,7 +122,7 @@ impl Window {
     pub const MIN_HEIGHT: usize = 80;
     
     /// Render the window
-    pub fn render(&self, screen: &mut Screen) {
+    pub fn render(&mut self, screen: &mut Screen) {
         if !self.visible {
             return;
         }
@@ -142,22 +153,60 @@ impl Window {
         
         // Content area for clipping - elements outside will be hidden
         let content = self.content_bounds();
-        let clip = &content;
+        let clip = content;
+        
+        // Clear cached dynamic labels - they'll be rebuilt during render
+        self.dynamic_labels.clear();
+        
+        // Clone elements to avoid borrow checker issues with &mut self
+        let elements = self.elements.clone();
         
         // Render elements - layout containers fill the content area
-        for elem in &self.elements {
-            self.render_element(screen, elem, content.x, content.y, content.width, content.height, clip);
+        for elem in &elements {
+            self.render_element(screen, elem, content.x, content.y, content.width, content.height, &clip);
         }
     }
     
+    /// Render only the dynamic labels (labels with {variables})
+    /// Used for efficient partial updates when only variable values change
+    pub fn render_dynamic_labels(&self, screen: &mut Screen) {
+        let clip = self.content_bounds();
+        
+        for label in &self.dynamic_labels {
+            // Redraw background first to clear old text
+            draw_filled_rect_clipped(screen, &label.bounds, COLOR_WINDOW_BG, &clip);
+            
+            // Draw updated text
+            let display_text = self.script.interpolate(&label.text);
+            draw_text_clipped(screen, label.bounds.x as usize, label.bounds.y as usize, &display_text, COLOR_FOREGROUND, &clip);
+        }
+    }
+    
+    /// Get the dirty rects for dynamic labels only
+    pub fn get_dynamic_label_rects(&self) -> alloc::vec::Vec<Rect> {
+        self.dynamic_labels.iter().map(|l| l.bounds).collect()
+    }
+    
     /// Render a single element at the given position
-    fn render_element(&self, screen: &mut Screen, elem: &Element, x: i32, y: i32, available_w: usize, available_h: usize, clip: &Rect) {
+    fn render_element(&mut self, screen: &mut Screen, elem: &Element, x: i32, y: i32, available_w: usize, available_h: usize, clip: &Rect) {
         match elem {
             Element::Label { text, x: ox, y: oy } => {
                 let px = x as usize + *ox as usize;
                 let py = y as usize + *oy as usize;
                 // Interpolate {variables} in text
                 let display_text = self.script.interpolate(text);
+                
+                // Cache dynamic labels (those with {variables}) for partial updates
+                if text.contains('{') {
+                    // Use a generous width to account for changing values
+                    let text_width = (display_text.len() + 10) * 8; // Extra buffer for growing numbers
+                    let text_height = 10; // Slightly taller for safety
+                    self.dynamic_labels.push(DynamicLabel {
+                        bounds: Rect::new(px as i32, py as i32, text_width, text_height),
+                        text: text.clone(),
+                    });
+                }
+                
                 draw_text_clipped(screen, px, py, &display_text, COLOR_FOREGROUND, clip);
             }
             Element::Button { text, x: ox, y: oy, width, height, .. } => {
@@ -232,7 +281,7 @@ impl Window {
     }
     
     /// Render a VBox layout
-    fn render_vbox(&self, screen: &mut Screen, children: &[Element], x: i32, y: i32, w: usize, h: usize, padding: usize, gap: usize, clip: &Rect) {
+    fn render_vbox(&mut self, screen: &mut Screen, children: &[Element], x: i32, y: i32, w: usize, h: usize, padding: usize, gap: usize, clip: &Rect) {
         let inner_x = x + padding as i32;
         let inner_y = y + padding as i32;
         let inner_w = w.saturating_sub(padding * 2);
@@ -252,7 +301,6 @@ impl Window {
         }
         
         // Calculate spacer size
-        let total_gap = if children.len() > 1 { gap * (children.len() - 1) } else { 0 };
         let remaining = inner_h.saturating_sub(fixed_height);
         let spacer_size = if spacer_count > 0 { remaining / spacer_count } else { 0 };
         
@@ -270,7 +318,7 @@ impl Window {
     }
     
     /// Render an HBox layout
-    fn render_hbox(&self, screen: &mut Screen, children: &[Element], x: i32, y: i32, w: usize, h: usize, padding: usize, gap: usize, clip: &Rect) {
+    fn render_hbox(&mut self, screen: &mut Screen, children: &[Element], x: i32, y: i32, w: usize, h: usize, padding: usize, gap: usize, clip: &Rect) {
         let inner_x = x + padding as i32;
         let inner_y = y + padding as i32;
         let inner_w = w.saturating_sub(padding * 2);
@@ -440,6 +488,8 @@ pub struct WindowManager {
     dirty_rects: alloc::vec::Vec<Rect>,
     /// Pending action from script (window_id, action)
     pending_action: Option<(usize, ScriptAction)>,
+    /// Windows that need only dynamic label updates (no full redraw)
+    label_update_windows: alloc::vec::Vec<usize>,
 }
 
 impl WindowManager {
@@ -460,6 +510,7 @@ impl WindowManager {
             last_mouse_down: false,
             dirty_rects: alloc::vec::Vec::new(),
             pending_action: None,
+            label_update_windows: alloc::vec::Vec::new(),
         }
     }
     
@@ -697,8 +748,9 @@ impl WindowManager {
                                     // Could implement minimize later
                                 }
                                 ScriptAction::None => {
-                                    // Button clicked, script ran, redraw to show updated variables
-                                    self.dirty_rects.push(bounds);
+                                    // Button clicked, script ran - queue label-only update
+                                    // This avoids flickering by not clearing the background
+                                    self.label_update_windows.push(i);
                                 }
                             }
                         }
@@ -735,11 +787,11 @@ impl WindowManager {
     }
     
     /// Render all windows
-    pub fn render(&self, screen: &mut Screen) {
+    pub fn render(&mut self, screen: &mut Screen) {
         // Render in z-order (back to front)
         for zi in 0..self.window_count {
             let i = self.z_order[zi];
-            if let Some(window) = &self.windows[i] {
+            if let Some(window) = &mut self.windows[i] {
                 window.render(screen);
             }
         }
@@ -750,18 +802,39 @@ impl WindowManager {
         core::mem::take(&mut self.dirty_rects)
     }
     
-    /// Check if there are pending dirty rects
+    /// Check if there are pending dirty rects or label updates
     pub fn has_dirty_rects(&self) -> bool {
-        !self.dirty_rects.is_empty()
+        !self.dirty_rects.is_empty() || !self.label_update_windows.is_empty()
+    }
+    
+    /// Check if there are pending label-only updates
+    pub fn has_label_updates(&self) -> bool {
+        !self.label_update_windows.is_empty()
+    }
+    
+    /// Render only the dynamic labels for windows that need updates
+    /// This is flicker-free because it doesn't clear the background
+    pub fn render_label_updates(&mut self, screen: &mut Screen) {
+        let windows_to_update = core::mem::take(&mut self.label_update_windows);
+        for window_idx in windows_to_update {
+            if let Some(window) = &self.windows[window_idx] {
+                if window.visible {
+                    window.render_dynamic_labels(screen);
+                }
+            }
+        }
     }
     
     /// Render only windows that intersect with dirty regions
     /// This is more efficient than full render for partial updates
-    pub fn render_dirty(&self, screen: &mut Screen, dirty: &[Rect]) {
+    pub fn render_dirty(&mut self, screen: &mut Screen, dirty: &[Rect]) {
+        // First, handle any label-only updates (flicker-free)
+        self.render_label_updates(screen);
+        
         // Render in z-order (back to front)
         for zi in 0..self.window_count {
             let i = self.z_order[zi];
-            if let Some(window) = &self.windows[i] {
+            if let Some(window) = &mut self.windows[i] {
                 if !window.visible {
                     continue;
                 }

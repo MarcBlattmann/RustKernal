@@ -93,7 +93,10 @@ pub fn run_gui(screen: &mut Screen) {
             // Still dragging - don't draw cursor
         } else {
             // Normal operation - not dragging
-            if needs_redraw || cursor_changed {
+            // First check for label-only updates (flicker-free, no background clear)
+            if desktop.has_label_updates() {
+                desktop.render_label_updates(screen);
+            } else if needs_redraw || cursor_changed {
                 // Get dirty regions for partial redraw
                 let dirty_rects = desktop.take_dirty_rects();
                 if dirty_rects.is_empty() && needs_redraw {

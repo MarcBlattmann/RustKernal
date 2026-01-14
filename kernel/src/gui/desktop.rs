@@ -130,6 +130,16 @@ impl Desktop {
         self.window_manager.is_dragging()
     }
     
+    /// Check if there are label-only updates (no full redraw needed)
+    pub fn has_label_updates(&self) -> bool {
+        self.window_manager.has_label_updates()
+    }
+    
+    /// Render only dynamic label updates (flicker-free)
+    pub fn render_label_updates(&mut self, screen: &mut Screen) {
+        self.window_manager.render_label_updates(screen);
+    }
+    
     /// Take dirty rects from both desktop and window manager
     pub fn take_dirty_rects(&mut self) -> Vec<Rect> {
         let mut rects = core::mem::take(&mut self.dirty_rects);
@@ -138,7 +148,7 @@ impl Desktop {
     }
     
     /// Render only dirty regions (partial redraw)
-    pub fn render_dirty(&self, screen: &mut Screen, dirty: &[Rect]) {
+    pub fn render_dirty(&mut self, screen: &mut Screen, dirty: &[Rect]) {
         // For each dirty rect, redraw just that area
         for rect in dirty {
             // Fill dirty area with background first
@@ -163,7 +173,7 @@ impl Desktop {
     }
     
     /// Render desktop (full redraw)
-    pub fn render(&self, screen: &mut Screen) {
+    pub fn render(&mut self, screen: &mut Screen) {
         // Clear background
         self.render_background(screen);
         
