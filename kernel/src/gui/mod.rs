@@ -6,6 +6,7 @@
 //! - `desktop`: Desktop environment and event handling
 //! - `widgets`: Reusable UI components
 //! - `app`: Declarative app builder system (HTML-like)
+//! - `script`: PursuitScript interpreter for app logic
 
 pub mod cursor;
 pub mod window;
@@ -16,6 +17,7 @@ pub mod app;
 pub mod pa_parser;
 pub mod layout;
 pub mod start_menu;
+pub mod script;
 
 use crate::drivers::display::screen::Screen;
 use crate::drivers::mouse;

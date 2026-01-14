@@ -17,13 +17,25 @@ use super::widgets::Rect;
 /// Element types that can be added to an app
 #[derive(Clone)]
 pub enum Element {
+    /// Text label - displays static or dynamic text
     Label { text: String, x: i32, y: i32 },
-    Button { text: String, x: i32, y: i32, width: usize, height: usize },
+    /// Clickable button with optional on_click handler
+    Button { 
+        text: String, 
+        x: i32, 
+        y: i32, 
+        width: usize, 
+        height: usize,
+        /// Script code to execute on click
+        on_click: Option<String>,
+    },
+    /// Text input box
     TextBox { x: i32, y: i32, width: usize, height: usize },
+    /// Container panel
     Panel { x: i32, y: i32, width: usize, height: usize },
     /// Vertical box - stacks children vertically
     VBox { padding: usize, gap: usize, children: Vec<Element> },
-    /// Horizontal box - stacks children horizontally
+    /// Horizontal box - stacks children horizontally  
     HBox { padding: usize, gap: usize, children: Vec<Element> },
     /// Spacer - takes remaining space in layout
     Spacer,
@@ -38,6 +50,8 @@ pub struct AppDef {
     pub height: usize,
     pub elements: Vec<Element>,
     pub visible: bool,
+    /// Script code to initialize variables and define functions
+    pub script: Option<String>,
 }
 
 impl AppDef {
@@ -51,6 +65,7 @@ impl AppDef {
             height: 200,
             elements: Vec::new(),
             visible: true,
+            script: None,
         }
     }
     
@@ -86,6 +101,7 @@ impl AppDef {
             y,
             width,
             height,
+            on_click: None,
         });
         self
     }

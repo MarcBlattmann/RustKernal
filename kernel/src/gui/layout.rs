@@ -486,6 +486,7 @@ fn flatten_recursive(node: &LayoutNode, out: &mut Vec<super::app::Element>) {
                 y: node.computed_y,
                 width: node.computed_width,
                 height: node.computed_height,
+                on_click: None,
             });
         }
         NodeKind::TextBox => {

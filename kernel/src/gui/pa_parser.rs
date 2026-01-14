@@ -117,6 +117,17 @@ impl<'a> PaParser<'a> {
                 continue;
             }
             
+            // Check for script tag specially
+            if self.peek_str("<script") {
+                self.consume("<script");
+                self.skip_until('>');
+                self.advance();
+                let script_content = self.parse_text_until_str("</script>");
+                self.consume("</script>");
+                app.script = Some(script_content);
+                continue;
+            }
+            
             // Parse child element
             if let Some(element) = self.parse_element()? {
                 app = app.element(element);
@@ -144,6 +155,12 @@ impl<'a> PaParser<'a> {
             "vbox" => self.parse_vbox(),
             "hbox" => self.parse_hbox(),
             "spacer" => self.parse_spacer(),
+            "script" => {
+                // Script tag is handled separately in parse(), skip content here
+                self.skip_until_str("</script>");
+                self.consume("</script>");
+                Ok(None)
+            }
             _ => {
                 // Skip unknown tags
                 self.skip_until('>');
@@ -360,6 +377,7 @@ impl<'a> PaParser<'a> {
         let mut y: i32 = 0;
         let mut width: usize = 80;
         let mut height: usize = 30;
+        let mut on_click: Option<String> = None;
         
         // Parse attributes
         loop {
@@ -375,7 +393,7 @@ impl<'a> PaParser<'a> {
                 if self.consume(">") {
                     return Ok(Some(Element::Button { 
                         text: String::from("Button"), 
-                        x, y, width, height 
+                        x, y, width, height, on_click
                     }));
                 }
             }
@@ -395,6 +413,7 @@ impl<'a> PaParser<'a> {
                 "y" => y = attr_value.parse().unwrap_or(0),
                 "width" => width = attr_value.parse().unwrap_or(80),
                 "height" => height = attr_value.parse().unwrap_or(30),
+                "on_click" | "onclick" => on_click = Some(attr_value),
                 _ => {}
             }
         }
@@ -407,7 +426,7 @@ impl<'a> PaParser<'a> {
         self.skip_until('>');
         self.advance();
         
-        Ok(Some(Element::Button { text, x, y, width, height }))
+        Ok(Some(Element::Button { text, x, y, width, height, on_click }))
     }
     
     fn parse_textbox(&mut self) -> Result<Option<Element>, ParseError> {
@@ -535,6 +554,37 @@ impl<'a> PaParser<'a> {
             }
             self.advance();
         }
+    }
+    
+    fn skip_until_str(&mut self, target: &str) {
+        while self.pos < self.input.len() {
+            if self.input[self.pos..].starts_with(target) {
+                break;
+            }
+            self.advance();
+        }
+    }
+    
+    fn peek_str(&self, s: &str) -> bool {
+        self.input[self.pos..].starts_with(s)
+    }
+    
+    fn parse_text_until_str(&mut self, stop: &str) -> String {
+        let mut result = String::new();
+        
+        while self.pos < self.input.len() {
+            if self.input[self.pos..].starts_with(stop) {
+                break;
+            }
+            if let Some(c) = self.peek() {
+                result.push(c);
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        
+        result.trim().into()
     }
     
     fn consume(&mut self, s: &str) -> bool {

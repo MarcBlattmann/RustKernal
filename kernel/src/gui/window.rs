@@ -4,12 +4,14 @@
 //! - Window structure with title bar
 //! - Dragging support with XOR outline
 //! - Dirty rectangle tracking for efficient redraws
+//! - PursuitScript support for button click handlers
 
 use alloc::string::String;
 use crate::drivers::display::screen::Screen;
 use super::theme::*;
 use super::widgets::{Rect, draw_filled_rect, draw_filled_rect_clipped, draw_rect_border, draw_rect_border_clipped, draw_text, draw_text_clipped, draw_close_button, draw_xor_outline};
 use super::app::{AppDef, Element};
+use super::script::{ScriptEngine, ScriptAction};
 
 /// Maximum number of windows
 const MAX_WINDOWS: usize = 8;
@@ -24,6 +26,8 @@ pub struct Window {
     /// Original size when created (for scaling elements)
     pub original_width: usize,
     pub original_height: usize,
+    /// Script engine for this window
+    pub script: ScriptEngine,
 }
 
 impl Window {
@@ -36,11 +40,19 @@ impl Window {
             elements: alloc::vec::Vec::new(),
             original_width: width,
             original_height: height,
+            script: ScriptEngine::new(),
         }
     }
     
     /// Create window from AppDef
     pub fn from_app(id: usize, app: &AppDef) -> Self {
+        let mut script = ScriptEngine::new();
+        
+        // Initialize script engine with app's script block
+        if let Some(ref script_source) = app.script {
+            script.execute_script(script_source);
+        }
+        
         Self {
             id,
             title: app.title.clone(),
@@ -49,6 +61,7 @@ impl Window {
             elements: app.elements.clone(),
             original_width: app.width,
             original_height: app.height,
+            script,
         }
     }
     
@@ -143,9 +156,11 @@ impl Window {
             Element::Label { text, x: ox, y: oy } => {
                 let px = x as usize + *ox as usize;
                 let py = y as usize + *oy as usize;
-                draw_text_clipped(screen, px, py, text, COLOR_FOREGROUND, clip);
+                // Interpolate {variables} in text
+                let display_text = self.script.interpolate(text);
+                draw_text_clipped(screen, px, py, &display_text, COLOR_FOREGROUND, clip);
             }
-            Element::Button { text, x: ox, y: oy, width, height } => {
+            Element::Button { text, x: ox, y: oy, width, height, .. } => {
                 let rect = Rect::new(x + *ox, y + *oy, *width, *height);
                 draw_filled_rect_clipped(screen, &rect, COLOR_BUTTON_BG, clip);
                 draw_rect_border_clipped(screen, &rect, COLOR_BUTTON_BORDER, 1, clip);
@@ -290,6 +305,107 @@ impl Window {
             }
         }
     }
+    
+    /// Handle a click at the given position (relative to window)
+    /// Returns the ScriptAction to execute, if any
+    pub fn handle_click(&mut self, mx: i32, my: i32) -> ScriptAction {
+        let content = self.content_bounds();
+        
+        // Clone elements to avoid borrow checker issues
+        let elements = self.elements.clone();
+        
+        // Check each button element
+        for elem in &elements {
+            if let Some(action) = self.check_element_click(elem, mx, my, content.x, content.y, content.width, content.height) {
+                return action;
+            }
+        }
+        
+        ScriptAction::None
+    }
+    
+    /// Recursively check if a click hits any element
+    fn check_element_click(&mut self, elem: &Element, mx: i32, my: i32, x: i32, y: i32, w: usize, h: usize) -> Option<ScriptAction> {
+        match elem {
+            Element::Button { x: ox, y: oy, width, height, on_click, .. } => {
+                let rect = Rect::new(x + *ox, y + *oy, *width, *height);
+                if rect.contains(mx, my) {
+                    if let Some(handler) = on_click {
+                        self.script.execute_inline(handler);
+                        return Some(self.script.take_action());
+                    }
+                }
+                None
+            }
+            Element::VBox { padding, gap, children } => {
+                let inner_x = x + *padding as i32;
+                let inner_y = y + *padding as i32;
+                let inner_w = w.saturating_sub(*padding * 2);
+                let inner_h = h.saturating_sub(*padding * 2);
+                
+                // Walk through children
+                let mut cur_y = inner_y;
+                let spacer_count = children.iter().filter(|c| matches!(c, Element::Spacer)).count();
+                let mut fixed_height: usize = 0;
+                for (i, child) in children.iter().enumerate() {
+                    if !matches!(child, Element::Spacer) {
+                        let (_, ch) = Self::element_min_size(child);
+                        fixed_height += ch;
+                    }
+                    if i > 0 { fixed_height += *gap; }
+                }
+                let remaining = inner_h.saturating_sub(fixed_height);
+                let spacer_size = if spacer_count > 0 { remaining / spacer_count } else { 0 };
+                
+                for child in children.iter() {
+                    if matches!(child, Element::Spacer) {
+                        cur_y += spacer_size as i32;
+                    } else {
+                        let (_, ch) = Self::element_min_size(child);
+                        if let Some(action) = self.check_element_click(child, mx, my, inner_x, cur_y, inner_w, ch) {
+                            return Some(action);
+                        }
+                        cur_y += ch as i32 + *gap as i32;
+                    }
+                }
+                None
+            }
+            Element::HBox { padding, gap, children } => {
+                let inner_x = x + *padding as i32;
+                let inner_y = y + *padding as i32;
+                let inner_w = w.saturating_sub(*padding * 2);
+                let inner_h = h.saturating_sub(*padding * 2);
+                
+                // Walk through children
+                let mut cur_x = inner_x;
+                let spacer_count = children.iter().filter(|c| matches!(c, Element::Spacer)).count();
+                let mut fixed_width: usize = 0;
+                for (i, child) in children.iter().enumerate() {
+                    if !matches!(child, Element::Spacer) {
+                        let (cw, _) = Self::element_min_size(child);
+                        fixed_width += cw;
+                    }
+                    if i > 0 { fixed_width += *gap; }
+                }
+                let remaining = inner_w.saturating_sub(fixed_width);
+                let spacer_size = if spacer_count > 0 { remaining / spacer_count } else { 0 };
+                
+                for child in children.iter() {
+                    if matches!(child, Element::Spacer) {
+                        cur_x += spacer_size as i32;
+                    } else {
+                        let (cw, _) = Self::element_min_size(child);
+                        if let Some(action) = self.check_element_click(child, mx, my, cur_x, inner_y, cw, inner_h) {
+                            return Some(action);
+                        }
+                        cur_x += cw as i32 + *gap as i32;
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Interaction mode
@@ -322,6 +438,8 @@ pub struct WindowManager {
     last_mouse_down: bool,
     /// Dirty regions to redraw
     dirty_rects: alloc::vec::Vec<Rect>,
+    /// Pending action from script (window_id, action)
+    pending_action: Option<(usize, ScriptAction)>,
 }
 
 impl WindowManager {
@@ -341,7 +459,13 @@ impl WindowManager {
             },
             last_mouse_down: false,
             dirty_rects: alloc::vec::Vec::new(),
+            pending_action: None,
         }
+    }
+    
+    /// Take any pending script action
+    pub fn take_pending_action(&mut self) -> Option<(usize, ScriptAction)> {
+        self.pending_action.take()
     }
     
     /// Bring a window to the front (top of z-order)
@@ -548,9 +672,30 @@ impl WindowManager {
                     return (false, true); // operation_just_started = true
                 }
                 
-                // Click inside window body - bring to front
+                // Click inside window body - check buttons first, then bring to front
                 if bounds.contains(mx, my) {
                     self.bring_to_front(i);
+                    
+                    // Check for button clicks
+                    if let Some(window) = &mut self.windows[i] {
+                        let action = window.handle_click(mx, my);
+                        match action {
+                            ScriptAction::Close => {
+                                self.dirty_rects.push(bounds);
+                                window.visible = false;
+                                return (true, false);
+                            }
+                            ScriptAction::Open(app_id) => {
+                                // Return the action - desktop will handle opening
+                                self.pending_action = Some((i, ScriptAction::Open(app_id)));
+                            }
+                            ScriptAction::Minimize => {
+                                // Could implement minimize later
+                            }
+                            ScriptAction::None => {}
+                        }
+                    }
+                    
                     // Mark all windows dirty for z-order redraw
                     for j in 0..self.window_count {
                         if let Some(w) = &self.windows[j] {

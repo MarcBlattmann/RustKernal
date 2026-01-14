@@ -1,10 +1,20 @@
 <app title="About Pursuit OS" width="300" height="200" x="450" y="120">
+    <script>
+        var count = 0
+        
+        func increment() {
+            count = count + 1
+        }
+    </script>
+
     <vbox padding="10">
         <label>Pursuit OS v0.1.0</label>
+        <label>{count}</label>
         <spacer/>
         <hbox>
             <spacer/>
-            <button>Ok!</button>
+            <button on_click="close()">Ok!</button>
+            <button on_click="increment()">Plus</button>
         </hbox>
     </vbox>
 </app>
