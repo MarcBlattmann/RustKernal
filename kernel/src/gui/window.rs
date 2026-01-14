@@ -213,6 +213,8 @@ struct DragState {
 pub struct WindowManager {
     windows: [Option<Window>; MAX_WINDOWS],
     window_count: usize,
+    /// Z-order: indices into windows array, front (top) is last
+    z_order: [usize; MAX_WINDOWS],
     drag: DragState,
     last_mouse_down: bool,
     /// Dirty regions to redraw
@@ -225,6 +227,7 @@ impl WindowManager {
         Self {
             windows: [NONE; MAX_WINDOWS],
             window_count: 0,
+            z_order: [0; MAX_WINDOWS],
             drag: DragState {
                 mode: InteractionMode::None,
                 window_id: 0,
@@ -238,10 +241,31 @@ impl WindowManager {
         }
     }
     
+    /// Bring a window to the front (top of z-order)
+    fn bring_to_front(&mut self, window_idx: usize) {
+        // Find where this window is in z_order
+        let mut pos = None;
+        for i in 0..self.window_count {
+            if self.z_order[i] == window_idx {
+                pos = Some(i);
+                break;
+            }
+        }
+        
+        if let Some(p) = pos {
+            // Shift everything after it down, put this at end
+            for i in p..(self.window_count - 1) {
+                self.z_order[i] = self.z_order[i + 1];
+            }
+            self.z_order[self.window_count - 1] = window_idx;
+        }
+    }
+    
     /// Check if mouse is over any window's resize handle
     pub fn is_over_resize_handle(&self, mx: i32, my: i32) -> bool {
         for i in (0..self.window_count).rev() {
-            if let Some(window) = &self.windows[i] {
+            let idx = self.z_order[i];
+            if let Some(window) = &self.windows[idx] {
                 if window.visible && window.resize_handle_bounds().contains(mx, my) {
                     return true;
                 }
@@ -258,6 +282,7 @@ impl WindowManager {
         
         let id = self.window_count;
         self.windows[id] = Some(Window::from_app(id, app));
+        self.z_order[self.window_count] = id; // Add to top of z-order
         self.window_count += 1;
         Some(id)
     }
@@ -270,6 +295,7 @@ impl WindowManager {
         
         let id = self.window_count;
         self.windows[id] = Some(Window::new(id, title, x, y, width, height));
+        self.z_order[self.window_count] = id; // Add to top of z-order
         self.window_count += 1;
         Some(id)
     }
@@ -361,55 +387,76 @@ impl WindowManager {
         
         // Check for new interactions
         if mouse_pressed {
-            // Check windows in reverse order (top to bottom)
-            for i in (0..self.window_count).rev() {
-                if let Some(window) = &self.windows[i] {
-                    if !window.visible {
+            // Check windows in reverse z-order (top to bottom)
+            for zi in (0..self.window_count).rev() {
+                let i = self.z_order[zi];
+                
+                // Get window data we need (to avoid borrowing issues)
+                let (visible, close_bounds, resize_bounds, titlebar, bounds, offset_x, offset_y) = {
+                    if let Some(window) = &self.windows[i] {
+                        (
+                            window.visible,
+                            window.close_button_bounds(),
+                            window.resize_handle_bounds(),
+                            window.titlebar_bounds(),
+                            window.bounds,
+                            mx - window.bounds.x,
+                            my - window.bounds.y,
+                        )
+                    } else {
                         continue;
                     }
-                    
-                    // Check close button
-                    let close_bounds = window.close_button_bounds();
-                    if close_bounds.contains(mx, my) {
-                        // Mark window area dirty
-                        let bounds = window.bounds;
-                        self.dirty_rects.push(bounds);
-                        if let Some(w) = &mut self.windows[i] {
-                            w.visible = false;
+                };
+                
+                if !visible {
+                    continue;
+                }
+                
+                // Check close button
+                if close_bounds.contains(mx, my) {
+                    self.dirty_rects.push(bounds);
+                    if let Some(w) = &mut self.windows[i] {
+                        w.visible = false;
+                    }
+                    return (true, false); // Need redraw
+                }
+                
+                // Check resize handle
+                if resize_bounds.contains(mx, my) {
+                    self.bring_to_front(i);
+                    self.drag.mode = InteractionMode::Resizing;
+                    self.drag.window_id = i;
+                    self.drag.offset_x = 0;
+                    self.drag.offset_y = 0;
+                    self.drag.outline_rect = Some(bounds);
+                    self.drag.original_bounds = Some(bounds);
+                    return (false, true); // operation_just_started = true
+                }
+                
+                // Check titlebar for drag start
+                if titlebar.contains(mx, my) {
+                    self.bring_to_front(i);
+                    self.drag.mode = InteractionMode::Dragging;
+                    self.drag.window_id = i;
+                    self.drag.offset_x = offset_x;
+                    self.drag.offset_y = offset_y;
+                    self.drag.outline_rect = Some(bounds);
+                    self.drag.original_bounds = Some(bounds);
+                    return (false, true); // operation_just_started = true
+                }
+                
+                // Click inside window body - bring to front
+                if bounds.contains(mx, my) {
+                    self.bring_to_front(i);
+                    // Mark all windows dirty for z-order redraw
+                    for j in 0..self.window_count {
+                        if let Some(w) = &self.windows[j] {
+                            if w.visible {
+                                self.dirty_rects.push(w.bounds);
+                            }
                         }
-                        return (true, false); // Need redraw
                     }
-                    
-                    // Check resize handle
-                    let resize_handle = window.resize_handle_bounds();
-                    if resize_handle.contains(mx, my) {
-                        self.drag.mode = InteractionMode::Resizing;
-                        self.drag.window_id = i;
-                        self.drag.offset_x = 0;
-                        self.drag.offset_y = 0;
-                        self.drag.outline_rect = Some(window.bounds);
-                        self.drag.original_bounds = Some(window.bounds);
-                        
-                        return (false, true); // operation_just_started = true
-                    }
-                    
-                    // Check titlebar for drag start
-                    let titlebar = window.titlebar_bounds();
-                    if titlebar.contains(mx, my) {
-                        self.drag.mode = InteractionMode::Dragging;
-                        self.drag.window_id = i;
-                        self.drag.offset_x = mx - window.bounds.x;
-                        self.drag.offset_y = my - window.bounds.y;
-                        self.drag.outline_rect = Some(window.bounds);
-                        self.drag.original_bounds = Some(window.bounds);
-                        
-                        return (false, true); // operation_just_started = true
-                    }
-                    
-                    // Click inside window
-                    if window.bounds.contains(mx, my) {
-                        return (false, false);
-                    }
+                    return (true, false);
                 }
             }
         }
@@ -426,7 +473,9 @@ impl WindowManager {
     
     /// Render all windows
     pub fn render(&self, screen: &mut Screen) {
-        for i in 0..self.window_count {
+        // Render in z-order (back to front)
+        for zi in 0..self.window_count {
+            let i = self.z_order[zi];
             if let Some(window) = &self.windows[i] {
                 window.render(screen);
             }
@@ -446,7 +495,9 @@ impl WindowManager {
     /// Render only windows that intersect with dirty regions
     /// This is more efficient than full render for partial updates
     pub fn render_dirty(&self, screen: &mut Screen, dirty: &[Rect]) {
-        for i in 0..self.window_count {
+        // Render in z-order (back to front)
+        for zi in 0..self.window_count {
+            let i = self.z_order[zi];
             if let Some(window) = &self.windows[i] {
                 if !window.visible {
                     continue;
