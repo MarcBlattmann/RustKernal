@@ -20,7 +20,7 @@ pub enum Element {
     Label { text: String, x: i32, y: i32 },
     Button { text: String, x: i32, y: i32, width: usize, height: usize },
     TextBox { x: i32, y: i32, width: usize, height: usize },
-    Panel { x: i32, y: i32, width: usize, height: usize, color: u32 },
+    Panel { x: i32, y: i32, width: usize, height: usize },
 }
 
 /// App definition - declarative window builder
@@ -85,8 +85,20 @@ impl AppDef {
     }
     
     /// Add a panel/box
-    pub fn panel(mut self, x: i32, y: i32, width: usize, height: usize, color: u32) -> Self {
-        self.elements.push(Element::Panel { x, y, width, height, color });
+    pub fn panel(mut self, x: i32, y: i32, width: usize, height: usize) -> Self {
+        self.elements.push(Element::Panel { x, y, width, height });
+        self
+    }
+    
+    /// Add a textbox
+    pub fn textbox(mut self, x: i32, y: i32, width: usize, height: usize) -> Self {
+        self.elements.push(Element::TextBox { x, y, width, height });
+        self
+    }
+    
+    /// Add any element directly (used by parser)
+    pub fn element(mut self, elem: Element) -> Self {
+        self.elements.push(elem);
         self
     }
     
@@ -120,7 +132,7 @@ pub fn create_file_manager_app() -> AppDef {
     AppDef::new("Files")
         .size(350, 250)
         .position(200, 150)
-        .panel(10, 30, 330, 200, 0xFF111111)
+        .panel(10, 30, 330, 200)
         .label("Documents/", 20, 50)
         .label("Downloads/", 20, 70)
         .label("readme.txt", 20, 90)

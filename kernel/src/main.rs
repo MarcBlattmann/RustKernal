@@ -18,7 +18,6 @@ use drivers::display::init_screen;
 use shell::{Console, Shell, handle_command};
 use alloc::string::String;
 
-/// Global screen storage for GUI mode
 static mut SCREEN_PTR: Option<*mut drivers::display::Screen> = None;
 
 entry_point!(kernel_main);
@@ -51,7 +50,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
                     console.print("\n");
                     
                     // Check for GUI command
-                    if input.trim() == "pursuit" {
+                    if input.trim() == "ui" {
                         console.print("Starting Pursuit Desktop...\n");
                         // Get screen back from console and run GUI
                         let screen = console.take_screen();

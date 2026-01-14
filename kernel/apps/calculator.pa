@@ -1,0 +1,26 @@
+<app title="Calculator" width="200" height="280" x="500" y="100">
+    <textbox x="10" y="30" width="180" height="30"/>
+    
+    <button x="10" y="70" width="40" height="35">7</button>
+    <button x="55" y="70" width="40" height="35">8</button>
+    <button x="100" y="70" width="40" height="35">9</button>
+    <button x="145" y="70" width="45" height="35">/</button>
+    
+    <button x="10" y="110" width="40" height="35">4</button>
+    <button x="55" y="110" width="40" height="35">5</button>
+    <button x="100" y="110" width="40" height="35">6</button>
+    <button x="145" y="110" width="45" height="35">*</button>
+    
+    <button x="10" y="150" width="40" height="35">1</button>
+    <button x="55" y="150" width="40" height="35">2</button>
+    <button x="100" y="150" width="40" height="35">3</button>
+    <button x="145" y="150" width="45" height="35">-</button>
+    
+    <button x="10" y="190" width="40" height="35">0</button>
+    <button x="55" y="190" width="40" height="35">.</button>
+    <button x="100" y="190" width="40" height="35">=</button>
+    <button x="145" y="190" width="45" height="35">+</button>
+    
+    <button x="10" y="235" width="85" height="30">C</button>
+    <button x="105" y="235" width="85" height="30">CE</button>
+</app>

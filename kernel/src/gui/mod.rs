@@ -13,6 +13,9 @@ pub mod desktop;
 pub mod widgets;
 pub mod theme;
 pub mod app;
+pub mod pa_parser;
+pub mod layout;
+pub mod start_menu;
 
 use crate::drivers::display::screen::Screen;
 use crate::drivers::mouse;
@@ -48,6 +51,18 @@ pub fn run_gui(screen: &mut Screen) {
         // Check dragging state BEFORE handling input
         let was_dragging = desktop.is_dragging();
         
+        // Update cursor type based on what we're hovering over
+        let new_cursor_type = if desktop.is_over_resize_handle(mx, my) && !desktop.is_dragging() {
+            cursor::CursorType::ResizeNWSE
+        } else {
+            cursor::CursorType::Arrow
+        };
+        
+        let cursor_changed = new_cursor_type != cursor::get_type();
+        if cursor_changed {
+            cursor::set_type(new_cursor_type);
+        }
+        
         // Always hide cursor before any screen operations
         cursor::hide(screen);
         
@@ -76,12 +91,12 @@ pub fn run_gui(screen: &mut Screen) {
             // Still dragging - don't draw cursor
         } else {
             // Normal operation - not dragging
-            if needs_redraw {
+            if needs_redraw || cursor_changed {
                 // Get dirty regions for partial redraw
                 let dirty_rects = desktop.take_dirty_rects();
-                if dirty_rects.is_empty() {
+                if dirty_rects.is_empty() && needs_redraw {
                     desktop.render(screen);
-                } else {
+                } else if !dirty_rects.is_empty() {
                     desktop.render_dirty(screen, &dirty_rects);
                 }
             }

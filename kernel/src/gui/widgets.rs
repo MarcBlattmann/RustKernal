@@ -51,6 +51,23 @@ impl Rect {
         let bottom = self.bottom().max(other.bottom());
         Rect::new(x, y, (right - x) as usize, (bottom - y) as usize)
     }
+    
+    /// Create intersection of two rectangles (clipped area)
+    /// Returns None if they don't intersect
+    pub fn intersection(&self, other: &Rect) -> Option<Rect> {
+        if !self.intersects(other) {
+            return None;
+        }
+        let x = self.x.max(other.x);
+        let y = self.y.max(other.y);
+        let right = self.right().min(other.right());
+        let bottom = self.bottom().min(other.bottom());
+        if right > x && bottom > y {
+            Some(Rect::new(x, y, (right - x) as usize, (bottom - y) as usize))
+        } else {
+            None
+        }
+    }
 }
 
 /// Draw a filled rectangle
@@ -61,6 +78,21 @@ pub fn draw_filled_rect(screen: &mut Screen, rect: &Rect, color: u32) {
             let y = rect.y as usize + py;
             if x < screen.width() && y < screen.height() {
                 screen.write_pixel(x, y, color);
+            }
+        }
+    }
+}
+
+/// Draw a filled rectangle, clipped to a clip region
+pub fn draw_filled_rect_clipped(screen: &mut Screen, rect: &Rect, color: u32, clip: &Rect) {
+    if let Some(clipped) = rect.intersection(clip) {
+        for py in 0..clipped.height {
+            for px in 0..clipped.width {
+                let x = clipped.x as usize + px;
+                let y = clipped.y as usize + py;
+                if x < screen.width() && y < screen.height() {
+                    screen.write_pixel(x, y, color);
+                }
             }
         }
     }
@@ -113,54 +145,131 @@ pub fn draw_rect_border(screen: &mut Screen, rect: &Rect, color: u32, thickness:
     }
 }
 
+/// Draw a rectangle border, clipped to a clip region
+pub fn draw_rect_border_clipped(screen: &mut Screen, rect: &Rect, color: u32, thickness: usize, clip: &Rect) {
+    // Top border
+    for t in 0..thickness {
+        for px in 0..rect.width {
+            let x = (rect.x + px as i32) as i32;
+            let y = rect.y + t as i32;
+            if clip.contains(x, y) && x >= 0 && y >= 0 {
+                let ux = x as usize;
+                let uy = y as usize;
+                if ux < screen.width() && uy < screen.height() {
+                    screen.write_pixel(ux, uy, color);
+                }
+            }
+        }
+    }
+    
+    // Bottom border
+    for t in 0..thickness {
+        for px in 0..rect.width {
+            let x = (rect.x + px as i32) as i32;
+            let y = rect.y + rect.height as i32 - 1 - t as i32;
+            if clip.contains(x, y) && x >= 0 && y >= 0 {
+                let ux = x as usize;
+                let uy = y as usize;
+                if ux < screen.width() && uy < screen.height() {
+                    screen.write_pixel(ux, uy, color);
+                }
+            }
+        }
+    }
+    
+    // Left border
+    for t in 0..thickness {
+        for py in 0..rect.height {
+            let x = rect.x + t as i32;
+            let y = (rect.y + py as i32) as i32;
+            if clip.contains(x, y) && x >= 0 && y >= 0 {
+                let ux = x as usize;
+                let uy = y as usize;
+                if ux < screen.width() && uy < screen.height() {
+                    screen.write_pixel(ux, uy, color);
+                }
+            }
+        }
+    }
+    
+    // Right border
+    for t in 0..thickness {
+        for py in 0..rect.height {
+            let x = rect.x + rect.width as i32 - 1 - t as i32;
+            let y = (rect.y + py as i32) as i32;
+            if clip.contains(x, y) && x >= 0 && y >= 0 {
+                let ux = x as usize;
+                let uy = y as usize;
+                if ux < screen.width() && uy < screen.height() {
+                    screen.write_pixel(ux, uy, color);
+                }
+            }
+        }
+    }
+}
+
 /// Draw XOR rectangle outline (for drag preview)
+/// Uses a dashed pattern for better visibility on any background
 /// Drawing twice at the same position erases it (XOR property)
 pub fn draw_xor_outline(screen: &mut Screen, rect: &Rect) {
     let sw = screen.width();
     let sh = screen.height();
     
-    // Top edge
-    for px in 0..rect.width {
-        let x = (rect.x + px as i32) as usize;
-        let y = rect.y as usize;
-        if x < sw && y < sh && rect.y >= 0 {
-            let old = screen.read_pixel(x, y);
-            screen.write_pixel(x, y, old ^ 0x00FFFFFF);
-        }
-    }
+    // XOR pattern - alternating pixels for dashed effect
+    // This ensures visibility on both black and white backgrounds
+    let xor_val = 0x00FFFFFF;
     
-    // Bottom edge
-    let bottom_y = rect.y + rect.height as i32 - 1;
-    if rect.height > 1 && bottom_y >= 0 {
-        for px in 0..rect.width {
+    // Top edge (dashed)
+    for px in 0..rect.width {
+        if (px % 4) < 2 { // 2 pixels on, 2 pixels off
             let x = (rect.x + px as i32) as usize;
-            let y = bottom_y as usize;
-            if x < sw && y < sh {
+            let y = rect.y as usize;
+            if x < sw && y < sh && rect.y >= 0 {
                 let old = screen.read_pixel(x, y);
-                screen.write_pixel(x, y, old ^ 0x00FFFFFF);
+                screen.write_pixel(x, y, old ^ xor_val);
             }
         }
     }
     
-    // Left edge (excluding corners)
-    for py in 1..rect.height.saturating_sub(1) {
-        let x = rect.x as usize;
-        let y = (rect.y + py as i32) as usize;
-        if x < sw && y < sh && rect.x >= 0 {
-            let old = screen.read_pixel(x, y);
-            screen.write_pixel(x, y, old ^ 0x00FFFFFF);
+    // Bottom edge (dashed)
+    let bottom_y = rect.y + rect.height as i32 - 1;
+    if rect.height > 1 && bottom_y >= 0 {
+        for px in 0..rect.width {
+            if (px % 4) < 2 {
+                let x = (rect.x + px as i32) as usize;
+                let y = bottom_y as usize;
+                if x < sw && y < sh {
+                    let old = screen.read_pixel(x, y);
+                    screen.write_pixel(x, y, old ^ xor_val);
+                }
+            }
         }
     }
     
-    // Right edge (excluding corners)
+    // Left edge (dashed, excluding corners)
+    // Left edge (dashed, excluding corners)
+    for py in 1..rect.height.saturating_sub(1) {
+        if (py % 4) < 2 {
+            let x = rect.x as usize;
+            let y = (rect.y + py as i32) as usize;
+            if x < sw && y < sh && rect.x >= 0 {
+                let old = screen.read_pixel(x, y);
+                screen.write_pixel(x, y, old ^ xor_val);
+            }
+        }
+    }
+    
+    // Right edge (dashed, excluding corners)
     let right_x = rect.x + rect.width as i32 - 1;
     if rect.width > 1 && right_x >= 0 {
         for py in 1..rect.height.saturating_sub(1) {
-            let x = right_x as usize;
-            let y = (rect.y + py as i32) as usize;
-            if x < sw && y < sh {
-                let old = screen.read_pixel(x, y);
-                screen.write_pixel(x, y, old ^ 0x00FFFFFF);
+            if (py % 4) < 2 {
+                let x = right_x as usize;
+                let y = (rect.y + py as i32) as usize;
+                if x < sw && y < sh {
+                    let old = screen.read_pixel(x, y);
+                    screen.write_pixel(x, y, old ^ xor_val);
+                }
             }
         }
     }
@@ -265,11 +374,41 @@ pub fn draw_char(screen: &mut Screen, x: usize, y: usize, c: char, color: u32) {
     }
 }
 
+/// Draw a single character, clipped to a clip region
+pub fn draw_char_clipped(screen: &mut Screen, x: usize, y: usize, c: char, color: u32, clip: &Rect) {
+    let bitmap = get_char_bitmap(c);
+    
+    for row in 0..FONT_HEIGHT {
+        for col in 0..FONT_WIDTH {
+            if (bitmap[row] >> (7 - col)) & 1 == 1 {
+                let px = x + col;
+                let py = y + row;
+                if clip.contains(px as i32, py as i32) && px < screen.width() && py < screen.height() {
+                    screen.write_pixel(px, py, color);
+                }
+            }
+        }
+    }
+}
+
 /// Draw text string
 pub fn draw_text(screen: &mut Screen, x: usize, y: usize, text: &str, color: u32) {
     let mut cx = x;
     for c in text.chars() {
         draw_char(screen, cx, y, c, color);
+        cx += FONT_WIDTH;
+    }
+}
+
+/// Draw text string, clipped to a clip region
+pub fn draw_text_clipped(screen: &mut Screen, x: usize, y: usize, text: &str, color: u32, clip: &Rect) {
+    let mut cx = x;
+    for c in text.chars() {
+        // Skip characters entirely outside clip region
+        if (cx + FONT_WIDTH) as i32 > clip.x && (cx as i32) < clip.right() 
+           && (y + FONT_HEIGHT) as i32 > clip.y && (y as i32) < clip.bottom() {
+            draw_char_clipped(screen, cx, y, c, color, clip);
+        }
         cx += FONT_WIDTH;
     }
 }

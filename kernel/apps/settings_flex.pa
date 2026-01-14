@@ -1,0 +1,31 @@
+<!-- Pursuit App - Flexbox Layout Example -->
+<!-- This uses the new automatic layout system -->
+
+<app title="Settings" width="400" height="300" x="150" y="100">
+    <vbox padding="15" gap="10">
+        <label>System Settings</label>
+        <panel height="2"/>
+        
+        <hbox gap="10">
+            <label grow="1">Display</label>
+            <button width="100">Configure</button>
+        </hbox>
+        
+        <hbox gap="10">
+            <label grow="1">Sound</label>
+            <button width="100">Configure</button>
+        </hbox>
+        
+        <hbox gap="10">
+            <label grow="1">Network</label>
+            <button width="100">Configure</button>
+        </hbox>
+        
+        <spacer/>
+        
+        <hbox gap="10" align="center">
+            <button width="80">OK</button>
+            <button width="80">Cancel</button>
+        </hbox>
+    </vbox>
+</app>

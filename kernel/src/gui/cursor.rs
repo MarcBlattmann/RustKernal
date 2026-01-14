@@ -4,6 +4,7 @@
 //! - Saves background before drawing cursor
 //! - Restores background when cursor moves
 //! - Smooth, flicker-free movement
+//! - Multiple cursor types (arrow, resize)
 
 use crate::drivers::display::screen::Screen;
 use super::theme::COLOR_CURSOR;
@@ -12,8 +13,15 @@ use super::theme::COLOR_CURSOR;
 const CURSOR_WIDTH: usize = 12;
 const CURSOR_HEIGHT: usize = 19;
 
+/// Cursor types
+#[derive(Clone, Copy, PartialEq)]
+pub enum CursorType {
+    Arrow,
+    ResizeNWSE, // Northwest-Southeast diagonal resize
+}
+
 /// Cursor bitmap (1 = white, 0 = transparent)
-const CURSOR_SHAPE: [[u8; CURSOR_WIDTH]; CURSOR_HEIGHT] = [
+const CURSOR_ARROW: [[u8; CURSOR_WIDTH]; CURSOR_HEIGHT] = [
     [1,0,0,0,0,0,0,0,0,0,0,0],
     [1,1,0,0,0,0,0,0,0,0,0,0],
     [1,1,1,0,0,0,0,0,0,0,0,0],
@@ -35,6 +43,30 @@ const CURSOR_SHAPE: [[u8; CURSOR_WIDTH]; CURSOR_HEIGHT] = [
     [0,0,0,0,0,0,1,1,1,1,0,0],
 ];
 
+/// Resize cursor (diagonal double arrow - NW to SE)
+const CURSOR_RESIZE: [[u8; CURSOR_WIDTH]; CURSOR_HEIGHT] = [
+    // top-left arrowhead
+    [1,1,1,1,1,0,0,0,0,0,0,0],
+    [1,1,1,1,0,0,0,0,0,0,0,0],
+    [1,1,1,1,0,0,0,0,0,0,0,0],
+    [1,1,0,0,1,0,0,0,0,0,0,0],
+    [1,0,0,0,0,1,0,0,0,0,0,0],
+    [0,0,0,0,0,0,1,0,0,0,0,0],
+    [0,0,0,0,0,0,0,1,0,0,0,1],
+    [0,0,0,0,0,0,0,0,1,0,1,1],
+    [0,0,0,0,0,0,0,0,0,1,1,1],
+    [0,0,0,0,0,0,0,0,1,1,1,1],
+    [0,0,0,0,0,0,0,1,1,1,1,1],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0,0,0],
+];
+
 /// Saved background under cursor
 static mut SAVED_BG: [[u32; CURSOR_WIDTH]; CURSOR_HEIGHT] = [[0; CURSOR_WIDTH]; CURSOR_HEIGHT];
 
@@ -49,6 +81,9 @@ static mut SCREEN_H: usize = 0;
 /// Whether cursor is currently visible on screen
 static mut CURSOR_VISIBLE: bool = false;
 
+/// Current cursor type
+static mut CURRENT_TYPE: CursorType = CursorType::Arrow;
+
 /// Initialize cursor system
 pub fn init(screen_width: usize, screen_height: usize) {
     unsafe {
@@ -57,6 +92,29 @@ pub fn init(screen_width: usize, screen_height: usize) {
         DRAWN_X = -100;
         DRAWN_Y = -100;
         CURSOR_VISIBLE = false;
+        CURRENT_TYPE = CursorType::Arrow;
+    }
+}
+
+/// Set cursor type
+pub fn set_type(cursor_type: CursorType) {
+    unsafe {
+        CURRENT_TYPE = cursor_type;
+    }
+}
+
+/// Get current cursor type
+pub fn get_type() -> CursorType {
+    unsafe { CURRENT_TYPE }
+}
+
+/// Get cursor shape for current type
+fn get_cursor_shape() -> &'static [[u8; CURSOR_WIDTH]; CURSOR_HEIGHT] {
+    unsafe {
+        match CURRENT_TYPE {
+            CursorType::Arrow => &CURSOR_ARROW,
+            CursorType::ResizeNWSE => &CURSOR_RESIZE,
+        }
     }
 }
 
@@ -84,15 +142,14 @@ fn restore_background(screen: &mut Screen) {
         let old_x = DRAWN_X;
         let old_y = DRAWN_Y;
         
+        // Restore full rectangle area (cursor could have changed shape)
         for row in 0..CURSOR_HEIGHT {
             for col in 0..CURSOR_WIDTH {
-                if CURSOR_SHAPE[row][col] == 1 {
-                    let px = old_x as usize + col;
-                    let py = old_y as usize + row;
-                    
-                    if px < SCREEN_W && py < SCREEN_H {
-                        screen.write_pixel(px, py, SAVED_BG[row][col]);
-                    }
+                let px = old_x as usize + col;
+                let py = old_y as usize + row;
+                
+                if px < SCREEN_W && py < SCREEN_H {
+                    screen.write_pixel(px, py, SAVED_BG[row][col]);
                 }
             }
         }
@@ -101,10 +158,11 @@ fn restore_background(screen: &mut Screen) {
 
 /// Draw cursor at given position
 fn draw_cursor_at(screen: &mut Screen, x: i32, y: i32) {
+    let shape = get_cursor_shape();
     unsafe {
         for row in 0..CURSOR_HEIGHT {
             for col in 0..CURSOR_WIDTH {
-                if CURSOR_SHAPE[row][col] == 1 {
+                if shape[row][col] == 1 {
                     let px = x as usize + col;
                     let py = y as usize + row;
                     

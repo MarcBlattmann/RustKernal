@@ -33,6 +33,12 @@ pub const COLOR_BUTTON_TEXT: u32 = 0xFFFFFFFF;
 /// Taskbar background
 pub const COLOR_TASKBAR_BG: u32 = 0xFF111111;
 
+/// Title bar highlight / selection color
+pub const COLOR_TITLEBAR: u32 = 0xFF333366;
+
+/// Menu highlight
+pub const COLOR_HIGHLIGHT: u32 = 0xFF444488;
+
 /// Cursor color
 pub const COLOR_CURSOR: u32 = 0xFFFFFFFF;
 
