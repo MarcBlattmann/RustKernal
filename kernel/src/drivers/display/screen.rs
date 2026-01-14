@@ -2,6 +2,7 @@ use super::color_utils::color_to_bytes;
 use super::bitmap::Bitmap;
 use bootloader_api::info::PixelFormat;
 use bootloader_api::BootInfo;
+use alloc::vec::Vec;
 
 pub fn init_screen(boot_info: &'static mut BootInfo) -> Screen {
     let framebuffer = boot_info.framebuffer.as_mut().expect("No framebuffer found");
@@ -25,6 +26,9 @@ pub struct Screen {
     pub stride: usize,
     pub framebuffer: &'static mut [u8],
     pub pixel_format: PixelFormat,
+    // Double buffering
+    back_buffer: Vec<u8>,
+    use_back_buffer: bool,
 }
 
 impl Screen {
@@ -43,6 +47,50 @@ impl Screen {
             stride,
             framebuffer,
             pixel_format,
+            back_buffer: Vec::new(),
+            use_back_buffer: false,
+        }
+    }
+
+    /// Get screen width
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    /// Get screen height
+    pub fn height(&self) -> usize {
+        self.height
+    }
+
+    /// Enable double buffering (call once before GUI mode)
+    pub fn enable_double_buffer(&mut self) {
+        if self.back_buffer.is_empty() {
+            self.back_buffer = alloc::vec![0u8; self.framebuffer.len()];
+        }
+        self.use_back_buffer = true;
+    }
+
+    /// Disable double buffering (return to direct mode)
+    pub fn disable_double_buffer(&mut self) {
+        self.use_back_buffer = false;
+    }
+
+    /// Swap back buffer to front (copy to screen) - optimized with chunks
+    pub fn swap_buffers(&mut self) {
+        if self.use_back_buffer && !self.back_buffer.is_empty() {
+            // Copy in large chunks for better performance
+            let src = &self.back_buffer;
+            let dst = &mut self.framebuffer;
+            let len = src.len().min(dst.len());
+            
+            // Use chunks for faster copying
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    src.as_ptr(),
+                    dst.as_mut_ptr(),
+                    len
+                );
+            }
         }
     }
 
@@ -53,18 +101,57 @@ impl Screen {
             if bytes[3] == 0 {
                 return true;
             }
-            return self.write_to_framebuffer(x, y, &bytes);
+            return self.write_to_buffer(x, y, &bytes);
         }
         return false;
     }
 
-    fn write_to_framebuffer(&mut self, x: usize, y: usize, bytes: &[u8]) -> bool {
+    /// Read a pixel from framebuffer
+    pub fn read_pixel(&self, x: usize, y: usize) -> u32 {
         let offset = (y * self.stride + x) * self.bytes_per_pixel;
         if offset + self.bytes_per_pixel <= self.framebuffer.len() {
-            self.framebuffer[offset..offset + self.bytes_per_pixel].copy_from_slice(&bytes[..self.bytes_per_pixel]);
-            return true;
+            let b = self.framebuffer[offset];
+            let g = self.framebuffer[offset + 1];
+            let r = self.framebuffer[offset + 2];
+            return 0xFF000000 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+        }
+        0
+    }
+
+    fn write_to_buffer(&mut self, x: usize, y: usize, bytes: &[u8]) -> bool {
+        let offset = (y * self.stride + x) * self.bytes_per_pixel;
+        
+        if self.use_back_buffer && !self.back_buffer.is_empty() {
+            if offset + self.bytes_per_pixel <= self.back_buffer.len() {
+                self.back_buffer[offset..offset + self.bytes_per_pixel].copy_from_slice(&bytes[..self.bytes_per_pixel]);
+                return true;
+            }
         } else {
-            return false;
+            if offset + self.bytes_per_pixel <= self.framebuffer.len() {
+                self.framebuffer[offset..offset + self.bytes_per_pixel].copy_from_slice(&bytes[..self.bytes_per_pixel]);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Fast clear of back buffer using unsafe memset
+    pub fn clear_buffer(&mut self, color: u32) {
+        if self.use_back_buffer && !self.back_buffer.is_empty() {
+            let bytes = color_to_bytes(color, self.pixel_format).unwrap_or([0, 0, 0, 255]);
+            let bpp = self.bytes_per_pixel;
+            
+            // For black (most common), use fast memset
+            if color == 0xFF000000 {
+                unsafe {
+                    core::ptr::write_bytes(self.back_buffer.as_mut_ptr(), 0, self.back_buffer.len());
+                }
+            } else {
+                // Fill with color pattern
+                for chunk in self.back_buffer.chunks_exact_mut(bpp) {
+                    chunk.copy_from_slice(&bytes[..bpp]);
+                }
+            }
         }
     }
 

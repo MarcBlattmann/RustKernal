@@ -2,6 +2,7 @@ pub mod pic;
 pub mod apic;
 pub mod timer;
 pub mod keyboard;
+pub mod mouse;
 pub mod display;
 pub mod filesystem;
 pub mod ata;
@@ -15,3 +16,4 @@ pub fn init() {
         let _ = drives::init();  // Initialize multi-drive support
     }
 }
+

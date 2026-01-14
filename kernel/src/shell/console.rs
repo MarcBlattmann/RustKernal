@@ -123,6 +123,11 @@ impl Console {
         }
     }
 
+    /// Take ownership of the screen (for switching to GUI mode)
+    pub fn take_screen(&mut self) -> &mut Screen {
+        &mut self.screen
+    }
+
     pub fn clear(&mut self) {
         self.screen.clear_screen(0xFF000000);
         self.cursor_x = 0;

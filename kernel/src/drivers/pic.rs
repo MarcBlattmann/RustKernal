@@ -13,8 +13,8 @@ const SLAVE_PIC_VECTOR_OFFSET: u8 = 40;
 const SLAVE_ON_IRQ2_FOR_MASTER: u8 = 4;
 const SLAVE_CASCADE_IDENTITY: u8 = 2;
 
-const MASK_TIMER_AND_KEYBOARD_ENABLED: u8 = 0xFC;
-const MASK_ALL: u8 = 0xFF;
+const MASK_TIMER_AND_KEYBOARD_ENABLED: u8 = 0xFC;  // IRQ0 and IRQ1 enabled
+const MASK_MOUSE_ENABLED: u8 = 0xEF;  // IRQ12 enabled (bit 4 on slave = 0)
 
 unsafe fn wait_for_io_operation() {
     unsafe {
@@ -48,8 +48,10 @@ pub fn init() {
         write_to_port(SLAVE_PIC_DATA_PORT, MODE_8086);
         wait_for_io_operation();
         
-        write_to_port(MASTER_PIC_DATA_PORT, MASK_TIMER_AND_KEYBOARD_ENABLED);
-        write_to_port(SLAVE_PIC_DATA_PORT, MASK_ALL);
+        // Enable IRQ0 (timer), IRQ1 (keyboard), IRQ2 (cascade to slave)
+        write_to_port(MASTER_PIC_DATA_PORT, 0xF8);  // 0xF8 = 11111000 - enable IRQ0,1,2
+        // Enable IRQ12 (mouse) on slave
+        write_to_port(SLAVE_PIC_DATA_PORT, MASK_MOUSE_ENABLED);
         wait_for_io_operation();
     }
     
