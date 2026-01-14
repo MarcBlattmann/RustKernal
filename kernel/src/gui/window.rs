@@ -127,63 +127,166 @@ impl Window {
         let close_bounds = self.close_button_bounds();
         draw_close_button(screen, close_bounds.x as usize, close_bounds.y as usize, BUTTON_SIZE);
         
-        // Calculate scale factors for responsive elements
-        let original_content_w = self.original_width.saturating_sub(BORDER_WIDTH * 2);
-        let original_content_h = self.original_height.saturating_sub(TITLEBAR_HEIGHT + BORDER_WIDTH);
+        // Content area for clipping - elements outside will be hidden
         let content = self.content_bounds();
-        let scale_x = if original_content_w > 0 { 
-            content.width as f32 / original_content_w as f32 
-        } else { 1.0 };
-        let scale_y = if original_content_h > 0 { 
-            content.height as f32 / original_content_h as f32 
-        } else { 1.0 };
-        
-        // Clip region is the content area - elements outside will be hidden
         let clip = &content;
         
-        // Render elements with scaling and clipping
+        // Render elements - layout containers fill the content area
         for elem in &self.elements {
-            match elem {
-                Element::Label { text, x, y } => {
-                    let px = content.x as usize + ((*x as f32) * scale_x) as usize;
-                    let py = content.y as usize + ((*y as f32) * scale_y) as usize;
-                    draw_text_clipped(screen, px, py, text, COLOR_FOREGROUND, clip);
+            self.render_element(screen, elem, content.x, content.y, content.width, content.height, clip);
+        }
+    }
+    
+    /// Render a single element at the given position
+    fn render_element(&self, screen: &mut Screen, elem: &Element, x: i32, y: i32, available_w: usize, available_h: usize, clip: &Rect) {
+        match elem {
+            Element::Label { text, x: ox, y: oy } => {
+                let px = x as usize + *ox as usize;
+                let py = y as usize + *oy as usize;
+                draw_text_clipped(screen, px, py, text, COLOR_FOREGROUND, clip);
+            }
+            Element::Button { text, x: ox, y: oy, width, height } => {
+                let rect = Rect::new(x + *ox, y + *oy, *width, *height);
+                draw_filled_rect_clipped(screen, &rect, COLOR_BUTTON_BG, clip);
+                draw_rect_border_clipped(screen, &rect, COLOR_BUTTON_BORDER, 1, clip);
+                let tx = rect.x as usize + 4;
+                let ty = rect.y as usize + (rect.height.saturating_sub(8)) / 2;
+                draw_text_clipped(screen, tx, ty, text, COLOR_BUTTON_TEXT, clip);
+            }
+            Element::Panel { x: ox, y: oy, width, height } => {
+                let rect = Rect::new(x + *ox, y + *oy, *width, *height);
+                draw_filled_rect_clipped(screen, &rect, 0xFF222222, clip);
+                draw_rect_border_clipped(screen, &rect, COLOR_WINDOW_BORDER, 1, clip);
+            }
+            Element::TextBox { x: ox, y: oy, width, height } => {
+                let rect = Rect::new(x + *ox, y + *oy, *width, *height);
+                draw_filled_rect_clipped(screen, &rect, 0xFF1A1A1A, clip);
+                draw_rect_border_clipped(screen, &rect, COLOR_FOREGROUND, 1, clip);
+            }
+            Element::VBox { padding, gap, children } => {
+                self.render_vbox(screen, children, x, y, available_w, available_h, *padding, *gap, clip);
+            }
+            Element::HBox { padding, gap, children } => {
+                self.render_hbox(screen, children, x, y, available_w, available_h, *padding, *gap, clip);
+            }
+            Element::Spacer => {
+                // Spacer doesn't render anything visually
+            }
+        }
+    }
+    
+    /// Get the minimum size an element needs
+    fn element_min_size(elem: &Element) -> (usize, usize) {
+        match elem {
+            Element::Label { text, .. } => (text.len() * 8, 16),
+            Element::Button { text, width, height, .. } => {
+                if *width > 0 && *height > 0 {
+                    (*width, *height)
+                } else {
+                    (text.len() * 8 + 16, 24)
                 }
-                Element::Button { text, x, y, width, height } => {
-                    let scaled_x = ((*x as f32) * scale_x) as i32;
-                    let scaled_y = ((*y as f32) * scale_y) as i32;
-                    let scaled_w = ((*width as f32) * scale_x) as usize;
-                    let scaled_h = ((*height as f32) * scale_y) as usize;
-                    let rect = Rect::new(
-                        content.x + scaled_x,
-                        content.y + scaled_y,
-                        scaled_w.max(20),
-                        scaled_h.max(16),
-                    );
-                    draw_filled_rect_clipped(screen, &rect, COLOR_BUTTON_BG, clip);
-                    draw_rect_border_clipped(screen, &rect, COLOR_BUTTON_BORDER, 1, clip);
-                    let tx = rect.x as usize + 4;
-                    let ty = rect.y as usize + (rect.height.saturating_sub(8)) / 2;
-                    draw_text_clipped(screen, tx, ty, text, COLOR_BUTTON_TEXT, clip);
+            }
+            Element::Panel { width, height, .. } => (*width, *height),
+            Element::TextBox { width, height, .. } => (*width, *height),
+            Element::VBox { padding, gap, children } => {
+                let mut w: usize = 0;
+                let mut h: usize = padding * 2;
+                for (i, child) in children.iter().enumerate() {
+                    if matches!(child, Element::Spacer) { continue; }
+                    let (cw, ch) = Self::element_min_size(child);
+                    w = w.max(cw);
+                    h += ch;
+                    if i > 0 { h += gap; }
                 }
-                Element::Panel { x, y, width, height } => {
-                    let scaled_x = ((*x as f32) * scale_x) as i32;
-                    let scaled_y = ((*y as f32) * scale_y) as i32;
-                    let scaled_w = ((*width as f32) * scale_x) as usize;
-                    let scaled_h = ((*height as f32) * scale_y) as usize;
-                    let rect = Rect::new(content.x + scaled_x, content.y + scaled_y, scaled_w.max(1), scaled_h.max(1));
-                    draw_filled_rect_clipped(screen, &rect, 0xFF222222, clip);
-                    draw_rect_border_clipped(screen, &rect, COLOR_WINDOW_BORDER, 1, clip);
+                (w + padding * 2, h)
+            }
+            Element::HBox { padding, gap, children } => {
+                let mut w: usize = padding * 2;
+                let mut h: usize = 0;
+                for (i, child) in children.iter().enumerate() {
+                    if matches!(child, Element::Spacer) { continue; }
+                    let (cw, ch) = Self::element_min_size(child);
+                    w += cw;
+                    h = h.max(ch);
+                    if i > 0 { w += gap; }
                 }
-                Element::TextBox { x, y, width, height } => {
-                    let scaled_x = ((*x as f32) * scale_x) as i32;
-                    let scaled_y = ((*y as f32) * scale_y) as i32;
-                    let scaled_w = ((*width as f32) * scale_x) as usize;
-                    let scaled_h = ((*height as f32) * scale_y) as usize;
-                    let rect = Rect::new(content.x + scaled_x, content.y + scaled_y, scaled_w.max(10), scaled_h.max(10));
-                    draw_filled_rect_clipped(screen, &rect, 0xFF1A1A1A, clip);
-                    draw_rect_border_clipped(screen, &rect, COLOR_FOREGROUND, 1, clip);
-                }
+                (w, h + padding * 2)
+            }
+            Element::Spacer => (0, 0),
+        }
+    }
+    
+    /// Render a VBox layout
+    fn render_vbox(&self, screen: &mut Screen, children: &[Element], x: i32, y: i32, w: usize, h: usize, padding: usize, gap: usize, clip: &Rect) {
+        let inner_x = x + padding as i32;
+        let inner_y = y + padding as i32;
+        let inner_w = w.saturating_sub(padding * 2);
+        let inner_h = h.saturating_sub(padding * 2);
+        
+        // Count spacers and calculate fixed content height
+        let mut spacer_count = 0;
+        let mut fixed_height: usize = 0;
+        for (i, child) in children.iter().enumerate() {
+            if matches!(child, Element::Spacer) {
+                spacer_count += 1;
+            } else {
+                let (_, ch) = Self::element_min_size(child);
+                fixed_height += ch;
+            }
+            if i > 0 { fixed_height += gap; }
+        }
+        
+        // Calculate spacer size
+        let total_gap = if children.len() > 1 { gap * (children.len() - 1) } else { 0 };
+        let remaining = inner_h.saturating_sub(fixed_height);
+        let spacer_size = if spacer_count > 0 { remaining / spacer_count } else { 0 };
+        
+        // Render children
+        let mut cur_y = inner_y;
+        for child in children.iter() {
+            if matches!(child, Element::Spacer) {
+                cur_y += spacer_size as i32;
+            } else {
+                let (_, ch) = Self::element_min_size(child);
+                self.render_element(screen, child, inner_x, cur_y, inner_w, ch, clip);
+                cur_y += ch as i32 + gap as i32;
+            }
+        }
+    }
+    
+    /// Render an HBox layout
+    fn render_hbox(&self, screen: &mut Screen, children: &[Element], x: i32, y: i32, w: usize, h: usize, padding: usize, gap: usize, clip: &Rect) {
+        let inner_x = x + padding as i32;
+        let inner_y = y + padding as i32;
+        let inner_w = w.saturating_sub(padding * 2);
+        let inner_h = h.saturating_sub(padding * 2);
+        
+        // Count spacers and calculate fixed content width
+        let mut spacer_count = 0;
+        let mut fixed_width: usize = 0;
+        for (i, child) in children.iter().enumerate() {
+            if matches!(child, Element::Spacer) {
+                spacer_count += 1;
+            } else {
+                let (cw, _) = Self::element_min_size(child);
+                fixed_width += cw;
+            }
+            if i > 0 { fixed_width += gap; }
+        }
+        
+        // Calculate spacer size
+        let remaining = inner_w.saturating_sub(fixed_width);
+        let spacer_size = if spacer_count > 0 { remaining / spacer_count } else { 0 };
+        
+        // Render children
+        let mut cur_x = inner_x;
+        for child in children.iter() {
+            if matches!(child, Element::Spacer) {
+                cur_x += spacer_size as i32;
+            } else {
+                let (cw, _) = Self::element_min_size(child);
+                self.render_element(screen, child, cur_x, inner_y, cw, inner_h, clip);
+                cur_x += cw as i32 + gap as i32;
             }
         }
     }

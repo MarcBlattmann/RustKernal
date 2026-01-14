@@ -21,6 +21,12 @@ pub enum Element {
     Button { text: String, x: i32, y: i32, width: usize, height: usize },
     TextBox { x: i32, y: i32, width: usize, height: usize },
     Panel { x: i32, y: i32, width: usize, height: usize },
+    /// Vertical box - stacks children vertically
+    VBox { padding: usize, gap: usize, children: Vec<Element> },
+    /// Horizontal box - stacks children horizontally
+    HBox { padding: usize, gap: usize, children: Vec<Element> },
+    /// Spacer - takes remaining space in layout
+    Spacer,
 }
 
 /// App definition - declarative window builder

@@ -1,5 +1,10 @@
 <app title="About Pursuit OS" width="300" height="200" x="450" y="120">
-    <label x="20" y="30">Pursuit OS v0.1.0</label>¨
-    <button x="20" y="50">hello</button>
-
+    <vbox padding="10">
+        <label>Pursuit OS v0.1.0</label>
+        <spacer/>
+        <hbox>
+            <spacer/>
+            <button>Ok!</button>
+        </hbox>
+    </vbox>
 </app>

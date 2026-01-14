@@ -141,6 +141,9 @@ impl<'a> PaParser<'a> {
             "text" => self.parse_label(), // Alias for label
             "btn" => self.parse_button(), // Alias for button
             "input" => self.parse_textbox(), // Alias for textbox
+            "vbox" => self.parse_vbox(),
+            "hbox" => self.parse_hbox(),
+            "spacer" => self.parse_spacer(),
             _ => {
                 // Skip unknown tags
                 self.skip_until('>');
@@ -148,6 +151,157 @@ impl<'a> PaParser<'a> {
                 Ok(None)
             }
         }
+    }
+    
+    fn parse_vbox(&mut self) -> Result<Option<Element>, ParseError> {
+        let mut padding: usize = 0;
+        let mut gap: usize = 5;
+        
+        // Parse attributes
+        loop {
+            self.skip_whitespace();
+            
+            if self.peek() == Some('>') {
+                self.advance();
+                break;
+            }
+            
+            if self.peek() == Some('/') {
+                self.advance();
+                if self.consume(">") {
+                    return Ok(Some(Element::VBox { padding, gap, children: alloc::vec::Vec::new() }));
+                }
+            }
+            
+            let attr_name = self.parse_identifier()?;
+            self.skip_whitespace();
+            
+            if !self.consume("=") {
+                continue;
+            }
+            
+            self.skip_whitespace();
+            let attr_value = self.parse_quoted_string()?;
+            
+            match attr_name.as_str() {
+                "padding" => padding = attr_value.parse().unwrap_or(0),
+                "gap" => gap = attr_value.parse().unwrap_or(5),
+                _ => {}
+            }
+        }
+        
+        // Parse children until </vbox>
+        let mut children = alloc::vec::Vec::new();
+        loop {
+            self.skip_whitespace();
+            
+            if self.consume("</vbox>") || self.consume("</VBox>") {
+                break;
+            }
+            
+            if self.peek() != Some('<') {
+                if self.pos >= self.input.len() {
+                    break;
+                }
+                self.advance();
+                continue;
+            }
+            
+            if let Some(element) = self.parse_element()? {
+                children.push(element);
+            }
+        }
+        
+        Ok(Some(Element::VBox { padding, gap, children }))
+    }
+    
+    fn parse_hbox(&mut self) -> Result<Option<Element>, ParseError> {
+        let mut padding: usize = 0;
+        let mut gap: usize = 5;
+        
+        // Parse attributes
+        loop {
+            self.skip_whitespace();
+            
+            if self.peek() == Some('>') {
+                self.advance();
+                break;
+            }
+            
+            if self.peek() == Some('/') {
+                self.advance();
+                if self.consume(">") {
+                    return Ok(Some(Element::HBox { padding, gap, children: alloc::vec::Vec::new() }));
+                }
+            }
+            
+            let attr_name = self.parse_identifier()?;
+            self.skip_whitespace();
+            
+            if !self.consume("=") {
+                continue;
+            }
+            
+            self.skip_whitespace();
+            let attr_value = self.parse_quoted_string()?;
+            
+            match attr_name.as_str() {
+                "padding" => padding = attr_value.parse().unwrap_or(0),
+                "gap" => gap = attr_value.parse().unwrap_or(5),
+                _ => {}
+            }
+        }
+        
+        // Parse children until </hbox>
+        let mut children = alloc::vec::Vec::new();
+        loop {
+            self.skip_whitespace();
+            
+            if self.consume("</hbox>") || self.consume("</HBox>") {
+                break;
+            }
+            
+            if self.peek() != Some('<') {
+                if self.pos >= self.input.len() {
+                    break;
+                }
+                self.advance();
+                continue;
+            }
+            
+            if let Some(element) = self.parse_element()? {
+                children.push(element);
+            }
+        }
+        
+        Ok(Some(Element::HBox { padding, gap, children }))
+    }
+    
+    fn parse_spacer(&mut self) -> Result<Option<Element>, ParseError> {
+        // Skip any attributes and close tag
+        loop {
+            self.skip_whitespace();
+            
+            if self.peek() == Some('>') {
+                self.advance();
+                break;
+            }
+            
+            if self.peek() == Some('/') {
+                self.advance();
+                if self.consume(">") {
+                    return Ok(Some(Element::Spacer));
+                }
+            }
+            
+            self.advance();
+        }
+        
+        // Check for </spacer> closing tag
+        self.skip_whitespace();
+        let _ = self.consume("</spacer>");
+        
+        Ok(Some(Element::Spacer))
     }
     
     fn parse_label(&mut self) -> Result<Option<Element>, ParseError> {
