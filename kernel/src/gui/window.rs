@@ -307,8 +307,8 @@ impl Window {
     }
     
     /// Handle a click at the given position (relative to window)
-    /// Returns the ScriptAction to execute, if any
-    pub fn handle_click(&mut self, mx: i32, my: i32) -> ScriptAction {
+    /// Returns: None if no button was clicked, Some(action) if a button was clicked
+    pub fn handle_click(&mut self, mx: i32, my: i32) -> Option<ScriptAction> {
         let content = self.content_bounds();
         
         // Clone elements to avoid borrow checker issues
@@ -317,11 +317,11 @@ impl Window {
         // Check each button element
         for elem in &elements {
             if let Some(action) = self.check_element_click(elem, mx, my, content.x, content.y, content.width, content.height) {
-                return action;
+                return Some(action);
             }
         }
         
-        ScriptAction::None
+        None // No button was clicked
     }
     
     /// Recursively check if a click hits any element
@@ -674,37 +674,52 @@ impl WindowManager {
                 
                 // Click inside window body - check buttons first, then bring to front
                 if bounds.contains(mx, my) {
-                    self.bring_to_front(i);
+                    // Check if this window is already on top
+                    let already_on_top = self.z_order[self.window_count - 1] == i;
                     
-                    // Check for button clicks
+                    // Check for button clicks first
+                    let mut needs_redraw = false;
                     if let Some(window) = &mut self.windows[i] {
-                        let action = window.handle_click(mx, my);
-                        match action {
-                            ScriptAction::Close => {
-                                self.dirty_rects.push(bounds);
-                                window.visible = false;
-                                return (true, false);
+                        if let Some(action) = window.handle_click(mx, my) {
+                            // A button was actually clicked
+                            needs_redraw = true;
+                            match action {
+                                ScriptAction::Close => {
+                                    self.dirty_rects.push(bounds);
+                                    window.visible = false;
+                                    return (true, false);
+                                }
+                                ScriptAction::Open(app_id) => {
+                                    self.pending_action = Some((i, ScriptAction::Open(app_id)));
+                                    self.dirty_rects.push(bounds);
+                                }
+                                ScriptAction::Minimize => {
+                                    // Could implement minimize later
+                                }
+                                ScriptAction::None => {
+                                    // Button clicked, script ran, redraw to show updated variables
+                                    self.dirty_rects.push(bounds);
+                                }
                             }
-                            ScriptAction::Open(app_id) => {
-                                // Return the action - desktop will handle opening
-                                self.pending_action = Some((i, ScriptAction::Open(app_id)));
-                            }
-                            ScriptAction::Minimize => {
-                                // Could implement minimize later
-                            }
-                            ScriptAction::None => {}
                         }
                     }
                     
-                    // Mark all windows dirty for z-order redraw
-                    for j in 0..self.window_count {
-                        if let Some(w) = &self.windows[j] {
-                            if w.visible {
-                                self.dirty_rects.push(w.bounds);
+                    // Only change z-order if not already on top
+                    if !already_on_top {
+                        self.bring_to_front(i);
+                        // Z-order changed - need to redraw overlapping windows
+                        for j in 0..self.window_count {
+                            if let Some(w) = &self.windows[j] {
+                                if w.visible && w.bounds.intersects(&bounds) {
+                                    self.dirty_rects.push(w.bounds);
+                                }
                             }
                         }
+                        return (true, false);
                     }
-                    return (true, false);
+                    
+                    // Return whether we need to redraw
+                    return (needs_redraw, false);
                 }
             }
         }
