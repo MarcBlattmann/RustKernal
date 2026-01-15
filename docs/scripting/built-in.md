@@ -47,16 +47,6 @@ var largest = max(score1, score2)
 var clamped = min(max(value, 0), 100)  // Clamp 0-100
 ```
 
-## Debug Functions
-
-### print(message)
-
-Prints a debug message (for development).
-
-```
-print("Debug: value is " + value)
-```
-
 ## Example
 
 ```xml
