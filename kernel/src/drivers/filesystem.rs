@@ -561,14 +561,20 @@ impl SimpleFS {
     }
     
     /// List files and directories in a specific directory path
-    /// Files are stored with full paths like "/folder/file.txt"
+    /// Files are stored with full paths like "folder/file.txt" (no leading /)
     /// This returns just the names of items directly in the given directory
     pub fn list_directory(&self, path: &str) -> Vec<(String, bool)> {
         let mut items = Vec::new();
-        let prefix = if path == "/" { 
-            String::from("/") 
-        } else { 
-            format!("{}/", path.trim_end_matches('/'))
+        let mut seen_dirs: Vec<String> = Vec::new();
+        
+        // Normalize path: remove leading/trailing slashes
+        let normalized_path = path.trim_matches('/');
+        
+        // Build prefix for matching (e.g., "folder/" for path "/folder")
+        let prefix = if normalized_path.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", normalized_path)
         };
         
         for entry in &self.entries {
@@ -577,25 +583,41 @@ impl SimpleFS {
             }
             
             let name = entry.get_name();
+            // Normalize stored name too
+            let normalized_name = name.trim_start_matches('/');
             
-            // Check if this file is directly in the given directory
-            if path == "/" {
-                // For root, we want files that start with "/" but have no other "/"
-                if name.starts_with('/') {
-                    let rest = &name[1..]; // Remove leading "/"
-                    if !rest.contains('/') {
-                        items.push((rest.to_string(), entry.is_directory()));
+            if prefix.is_empty() {
+                // Root directory - files without any "/" or just the first component
+                if !normalized_name.contains('/') {
+                    items.push((normalized_name.to_string(), entry.is_directory()));
+                } else {
+                    // Has subdirectory - extract first component as folder
+                    if let Some(slash_pos) = normalized_name.find('/') {
+                        let folder_name = &normalized_name[..slash_pos];
+                        if !folder_name.is_empty() && !seen_dirs.contains(&folder_name.to_string()) {
+                            seen_dirs.push(folder_name.to_string());
+                            items.push((folder_name.to_string(), true));
+                        }
                     }
-                } else if !name.contains('/') {
-                    // Files without any path separator are at root
-                    items.push((name, entry.is_directory()));
                 }
             } else {
-                // For subdirectories, check if file starts with "path/" and has no more "/"
-                if name.starts_with(&prefix) {
-                    let rest = &name[prefix.len()..];
-                    if !rest.contains('/') && !rest.is_empty() {
-                        items.push((rest.to_string(), entry.is_directory()));
+                // Subdirectory - check if file starts with "prefix" 
+                if normalized_name.starts_with(&prefix) {
+                    let rest = &normalized_name[prefix.len()..];
+                    if !rest.is_empty() {
+                        if !rest.contains('/') {
+                            // Direct child file
+                            items.push((rest.to_string(), entry.is_directory()));
+                        } else {
+                            // Has more subdirectories - extract next folder component
+                            if let Some(slash_pos) = rest.find('/') {
+                                let folder_name = &rest[..slash_pos];
+                                if !folder_name.is_empty() && !seen_dirs.contains(&folder_name.to_string()) {
+                                    seen_dirs.push(folder_name.to_string());
+                                    items.push((folder_name.to_string(), true));
+                                }
+                            }
+                        }
                     }
                 }
             }
