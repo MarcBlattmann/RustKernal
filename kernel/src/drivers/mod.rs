@@ -14,6 +14,8 @@ pub fn init() {
     
     if ata::init().is_ok() {
         let _ = drives::init();  // Initialize multi-drive support
+        // Initialize filesystem after disk is available
+        let _ = filesystem::init();
     }
 }
 

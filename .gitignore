@@ -1,1 +1,4 @@
 target/
+
+# Virtual disk image (persistent filesystem storage)
+disk.img

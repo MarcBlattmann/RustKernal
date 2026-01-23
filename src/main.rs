@@ -1,7 +1,7 @@
 // launches the kernel in QEMU
 
 use std::process::Command;
-use std::path::Path;
+use std::path::PathBuf;
 use std::fs;
 
 const DISK_SIZE_MB: u64 = 32;
@@ -9,8 +9,10 @@ const DISK_SIZE_MB: u64 = 32;
 fn main() {
     let bios_path = env!("BIOS_PATH");
     
-    let bios_dir = Path::new(bios_path).parent().unwrap_or(Path::new("."));
-    let disk_path = bios_dir.join("disk.img");
+    // Store disk.img in the PROJECT ROOT directory (not the temp build dir)
+    // This ensures the disk persists across rebuilds and cargo clean
+    let project_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let disk_path = project_root.join("disk.img");
     let disk_path_str = disk_path.to_string_lossy();
     
     if !disk_path.exists() {
@@ -24,11 +26,17 @@ fn main() {
     }
     
     println!("Starting QEMU with BIOS image: {}", bios_path);
+    println!("Data disk: {}", disk_path_str);
     
+    // Use explicit IDE configuration for reliable drive mapping:
+    // - Boot drive on IDE bus 0, unit 0 (Primary Master)
+    // - Data drive on IDE bus 0, unit 1 (Primary Slave)
     let status = Command::new("qemu-system-x86_64")
         .args([
-            "-drive", &format!("format=raw,file={},index=0,media=disk", bios_path),
-            "-drive", &format!("format=raw,file={},index=1,media=disk", disk_path_str),
+            // Boot drive (Primary Master)
+            "-drive", &format!("if=ide,bus=0,unit=0,format=raw,file={}", bios_path),
+            // Persistent data drive (Primary Slave) 
+            "-drive", &format!("if=ide,bus=0,unit=1,format=raw,file={}", disk_path_str),
         ])
         .status()
         .expect("Failed to start QEMU. Make sure qemu-system-x86_64 is installed and in your PATH.");
