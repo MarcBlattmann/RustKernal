@@ -72,8 +72,14 @@ impl Desktop {
                 // Menu was closed and app selected - mark menu area as dirty
                 self.dirty_rects.push(menu_rect);
                 
-                // Launch the selected app - mark new window area as dirty
-                self.launch_app(app_id);
+                // Check if it's a filesystem path (contains /) or a .pa file
+                if app_id.ends_with(".pa") {
+                    // Run .pa file from filesystem
+                    self.run_pa_file(&app_id);
+                } else {
+                    // Launch built-in or embedded app
+                    self.launch_app(&app_id);
+                }
                 return (true, false);
             }
             
@@ -195,6 +201,41 @@ impl Desktop {
         }
     }
     
+    /// Run a .pa file from the filesystem (called from start menu or Ctrl+R in editor)
+    pub fn run_pa_file(&mut self, filepath: &str) {
+        use super::pa_parser::{parse_pa, create_error_app, ParseError};
+        
+        // Read file content from filesystem
+        let content = {
+            let fs = FILESYSTEM.lock();
+            if let Some(data) = fs.read_file(filepath) {
+                String::from_utf8_lossy(&data).into_owned()
+            } else {
+                // File not found
+                let error_app = create_error_app(filepath, &ParseError::NotFound);
+                let win_rect = Rect::new(error_app.x, error_app.y, error_app.width, error_app.height);
+                self.dirty_rects.push(win_rect);
+                self.window_manager.add_app(&error_app);
+                return;
+            }
+        };
+        
+        // Parse the .pa content
+        match parse_pa(&content) {
+            Ok(app_def) => {
+                let win_rect = Rect::new(app_def.x, app_def.y, app_def.width, app_def.height);
+                self.dirty_rects.push(win_rect);
+                self.window_manager.add_app(&app_def);
+            }
+            Err(error) => {
+                let error_app = create_error_app(filepath, &error);
+                let win_rect = Rect::new(error_app.x, error_app.y, error_app.width, error_app.height);
+                self.dirty_rects.push(win_rect);
+                self.window_manager.add_app(&error_app);
+            }
+        }
+    }
+    
     /// Process any pending actions from window manager (e.g., opening files)
     pub fn process_pending_actions(&mut self) {
         use super::script::ScriptAction;
@@ -204,11 +245,16 @@ impl Desktop {
                 ScriptAction::Open(filepath) => {
                     // Check if this looks like a file path (contains / or .)
                     if filepath.contains('/') || filepath.contains('.') {
+                        // It's a file - always open in editor (including .pa files for editing)
                         self.open_file_in_editor(&filepath);
                     } else {
                         // It's an app ID, launch it
                         self.launch_app(&filepath);
                     }
+                }
+                ScriptAction::RunApp(filepath) => {
+                    // Run a .pa app file (from Ctrl+R in code editor)
+                    self.run_pa_file(&filepath);
                 }
                 ScriptAction::Close => {
                     // Window was closed - already handled

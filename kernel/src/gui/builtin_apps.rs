@@ -398,10 +398,17 @@ impl CodeEditor {
         }
     }
 
-    pub fn handle_key(&mut self, key: char, ctrl: bool) {
+    pub fn handle_key(&mut self, key: char, ctrl: bool) -> ExplorerAction {
         if ctrl {
             match key {
                 's' | 'S' => { self.save_file(); }
+                'r' | 'R' => {
+                    // Save and run if it's a .pa file
+                    self.save_file();
+                    if self.buffer.filename.ends_with(".pa") {
+                        return ExplorerAction::RunApp(self.buffer.filename.clone());
+                    }
+                }
                 _ => {}
             }
         } else {
@@ -413,6 +420,7 @@ impl CodeEditor {
                 _ => {}
             }
         }
+        ExplorerAction::None
     }
 
     pub fn handle_special_key(&mut self, key: SpecialKey) {
@@ -599,12 +607,13 @@ pub enum ContextMenuOption {
     Refresh,
 }
 
-/// Action result from file explorer click
+/// Action result from file explorer click or code editor
 #[derive(Clone)]
 pub enum ExplorerAction {
     None,
     OpenFile(String),      // Open file in code editor
     NavigateToDir(String), // Navigate into directory
+    RunApp(String),        // Run a .pa app file
 }
 
 pub struct FileExplorer {

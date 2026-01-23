@@ -2,8 +2,8 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use alloc::vec;
 use crate::drivers::display::screen::Screen;
+use crate::drivers::filesystem::FILESYSTEM;
 use super::widgets::{Rect, draw_filled_rect, draw_rect_border, draw_text};
 use super::theme::*;
 
@@ -11,14 +11,14 @@ use super::theme::*;
 #[derive(Clone)]
 pub struct MenuItem {
     pub name: String,
-    pub app_id: &'static str,  // Identifier to load the app
+    pub app_id: String,  // Identifier to load the app (or filepath for filesystem apps)
 }
 
 impl MenuItem {
-    pub fn new(name: &str, app_id: &'static str) -> Self {
+    pub fn new(name: &str, app_id: &str) -> Self {
         Self {
             name: String::from(name),
-            app_id,
+            app_id: String::from(app_id),
         }
     }
 }
@@ -51,11 +51,27 @@ impl StartMenu {
         items.push(MenuItem::new("Documentation", "docs"));
         items.push(MenuItem::new("---", "---")); // Separator
         
-        // Add .pa apps from the apps folder
+        // Add .pa apps embedded at compile time
         for app_id in get_app_ids() {
             // Create a nice display name from the app_id
             let name = Self::format_app_name(app_id);
             items.push(MenuItem::new(&name, app_id));
+        }
+        
+        // Add .pa apps from filesystem "apps" folder
+        {
+            let fs = FILESYSTEM.lock();
+            let entries = fs.list_directory("apps");
+            for (name, is_dir) in entries {
+                if !is_dir && name.ends_with(".pa") {
+                    // Extract the app name without .pa extension
+                    let app_name = name.trim_end_matches(".pa");
+                    let display_name = Self::format_app_name(app_name);
+                    // Store the full path so it can be opened from filesystem
+                    let filepath = alloc::format!("apps/{}", name);
+                    items.push(MenuItem::new(&display_name, &filepath));
+                }
+            }
         }
         
         let height = items.len() * Self::ITEM_HEIGHT + Self::PADDING * 2;
@@ -69,6 +85,42 @@ impl StartMenu {
             items,
             hover_index: None,
         }
+    }
+    
+    /// Refresh the menu items (call when apps folder changes)
+    pub fn refresh(&mut self) {
+        use super::pa_parser::get_app_ids;
+        
+        self.items.clear();
+        
+        // Add built-in native apps first
+        self.items.push(MenuItem::new("Code Editor", "editor"));
+        self.items.push(MenuItem::new("File Explorer", "explorer"));
+        self.items.push(MenuItem::new("Terminal", "terminal"));
+        self.items.push(MenuItem::new("Documentation", "docs"));
+        self.items.push(MenuItem::new("---", "---")); // Separator
+        
+        // Add .pa apps embedded at compile time
+        for app_id in get_app_ids() {
+            let name = Self::format_app_name(app_id);
+            self.items.push(MenuItem::new(&name, app_id));
+        }
+        
+        // Add .pa apps from filesystem "apps" folder
+        {
+            let fs = FILESYSTEM.lock();
+            let entries = fs.list_directory("apps");
+            for (name, is_dir) in entries {
+                if !is_dir && name.ends_with(".pa") {
+                    let app_name = name.trim_end_matches(".pa");
+                    let display_name = Self::format_app_name(app_name);
+                    let filepath = alloc::format!("apps/{}", name);
+                    self.items.push(MenuItem::new(&display_name, &filepath));
+                }
+            }
+        }
+        
+        self.height = self.items.len() * Self::ITEM_HEIGHT + Self::PADDING * 2;
     }
     
     /// Format app ID into a nice display name
@@ -128,7 +180,7 @@ impl StartMenu {
     
     /// Handle mouse input
     /// Returns: (needs_redraw, clicked_app_id)
-    pub fn handle_input(&mut self, mx: i32, my: i32, mouse_pressed: bool) -> (bool, Option<&'static str>) {
+    pub fn handle_input(&mut self, mx: i32, my: i32, mouse_pressed: bool) -> (bool, Option<String>) {
         if !self.visible {
             return (false, None);
         }
@@ -147,7 +199,7 @@ impl StartMenu {
                 self.hover_index = Some(index);
                 
                 if mouse_pressed {
-                    let app_id = self.items[index].app_id;
+                    let app_id = self.items[index].app_id.clone();
                     self.hide();
                     return (true, Some(app_id));
                 }

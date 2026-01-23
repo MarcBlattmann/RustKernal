@@ -180,6 +180,12 @@ impl SimpleFS {
         }
         
         self.initialized = true;
+        
+        // Ensure "apps" folder exists for user-created apps
+        if self.get_file_info("apps").is_none() {
+            self.create_directory(String::from("apps"));
+        }
+        
         Ok(())
     }
 

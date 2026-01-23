@@ -313,10 +313,10 @@ impl Window {
     }
     
     /// Handle keyboard input for native apps
-    /// Returns ExplorerAction for file explorer (to open files)
+    /// Returns ExplorerAction for file explorer (to open files) or code editor (to run apps)
     pub fn handle_key(&mut self, key: char, ctrl: bool) -> ExplorerAction {
         match &mut self.native_app {
-            NativeApp::Editor(editor) => { editor.handle_key(key, ctrl); ExplorerAction::None },
+            NativeApp::Editor(editor) => editor.handle_key(key, ctrl),
             NativeApp::Terminal(terminal) => { terminal.handle_key(key); ExplorerAction::None },
             NativeApp::Docs(docs) => { docs.handle_key(key); ExplorerAction::None },
             NativeApp::Explorer(explorer) => explorer.handle_key(key),
@@ -968,6 +968,10 @@ impl WindowManager {
                                     self.pending_action = Some((i, ScriptAction::Open(app_id)));
                                     self.dirty_regions.push(DirtyRegion::FullWindow(i));
                                 }
+                                ScriptAction::RunApp(filepath) => {
+                                    self.pending_action = Some((i, ScriptAction::RunApp(filepath)));
+                                    self.dirty_regions.push(DirtyRegion::FullWindow(i));
+                                }
                                 ScriptAction::Minimize => {
                                     // Could implement minimize later
                                 }
@@ -990,6 +994,10 @@ impl WindowManager {
                                 ExplorerAction::OpenFile(filename) => {
                                     // Store the action to open a file
                                     self.pending_action = Some((i, ScriptAction::Open(filename)));
+                                }
+                                ExplorerAction::RunApp(filepath) => {
+                                    // Run a .pa app file - uses same Open action
+                                    self.pending_action = Some((i, ScriptAction::Open(filepath)));
                                 }
                                 ExplorerAction::NavigateToDir(_) => {
                                     // Navigation already handled inside explorer
@@ -1028,10 +1036,14 @@ impl WindowManager {
                     // Call the handler with ctrl state
                     let action = window.handle_key(key, ctrl);
                     
-                    // Handle explorer actions (open file)
+                    // Handle explorer actions (open file) or editor actions (run app)
                     match action {
                         ExplorerAction::OpenFile(filepath) => {
                             self.pending_action = Some((topmost_idx, ScriptAction::Open(filepath)));
+                        }
+                        ExplorerAction::RunApp(filepath) => {
+                            // Run app - use dedicated RunApp action
+                            self.pending_action = Some((topmost_idx, ScriptAction::RunApp(filepath)));
                         }
                         ExplorerAction::NavigateToDir(_) => {
                             // Navigation handled inside explorer

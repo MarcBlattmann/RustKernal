@@ -33,6 +33,8 @@ fn main() {
     // - Data drive on IDE bus 0, unit 1 (Primary Slave)
     let status = Command::new("qemu-system-x86_64")
         .args([
+            // Use TCG (software emulation) - WHPX causes "VP exit code 4" errors
+            "-accel", "tcg,thread=multi",
             // Boot drive (Primary Master)
             "-drive", &format!("if=ide,bus=0,unit=0,format=raw,file={}", bios_path),
             // Persistent data drive (Primary Slave) 

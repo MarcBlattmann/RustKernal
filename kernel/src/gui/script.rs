@@ -57,7 +57,6 @@ use alloc::format;
 use alloc::boxed::Box;
 use crate::drivers::drives::DRIVE_MANAGER;
 
-/// Script value types
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Null,
@@ -69,7 +68,6 @@ pub enum Value {
 }
 
 impl Value {
-    /// Convert to display string
     pub fn to_display(&self) -> String {
         match self {
             Value::Null => String::from("null"),
@@ -185,6 +183,7 @@ pub enum ScriptAction {
     None,
     Close,
     Open(String),
+    RunApp(String),  // Run a .pa app file
     Minimize,
 }
 
