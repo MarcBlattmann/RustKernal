@@ -308,11 +308,19 @@ impl SimpleFS {
         None
     }
 
-    /// Find entry by name
+    /// Find entry by name (normalizes path by stripping leading /)
     fn find_entry(&self, name: &str) -> Option<usize> {
+        // Normalize the search name by stripping leading /
+        let search_name = name.trim_start_matches('/');
+        
         for (i, entry) in self.entries.iter().enumerate() {
-            if !entry.is_empty() && entry.get_name() == name {
-                return Some(i);
+            if !entry.is_empty() {
+                // Also normalize the stored name
+                let entry_name = entry.get_name();
+                let normalized_entry = entry_name.trim_start_matches('/');
+                if normalized_entry == search_name {
+                    return Some(i);
+                }
             }
         }
         None
@@ -320,8 +328,11 @@ impl SimpleFS {
 
     /// Create a new file
     pub fn create_file(&mut self, name: String) -> bool {
+        // Normalize path by stripping leading /
+        let normalized_name = name.trim_start_matches('/').to_string();
+        
         // Check if file already exists
-        if self.find_entry(&name).is_some() {
+        if self.find_entry(&normalized_name).is_some() {
             return false;
         }
         
@@ -333,7 +344,7 @@ impl SimpleFS {
         
         // Create entry
         self.entries[entry_idx] = DirEntry::empty();
-        self.entries[entry_idx].set_name(&name);
+        self.entries[entry_idx].set_name(&normalized_name);
         self.entries[entry_idx].file_type = FileType::File as u8;
         self.entries[entry_idx].size = 0;
         self.entries[entry_idx].first_block = 0;
@@ -349,8 +360,11 @@ impl SimpleFS {
 
     /// Create a new directory
     pub fn create_directory(&mut self, name: String) -> bool {
+        // Normalize path by stripping leading /
+        let normalized_name = name.trim_start_matches('/').to_string();
+        
         // Check if directory already exists
-        if self.find_entry(&name).is_some() {
+        if self.find_entry(&normalized_name).is_some() {
             return false;
         }
         
@@ -362,7 +376,7 @@ impl SimpleFS {
         
         // Create entry
         self.entries[entry_idx] = DirEntry::empty();
-        self.entries[entry_idx].set_name(&name);
+        self.entries[entry_idx].set_name(&normalized_name);
         self.entries[entry_idx].file_type = FileType::Directory as u8;
         
         self.superblock.used_entries += 1;

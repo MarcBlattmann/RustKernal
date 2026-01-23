@@ -813,21 +813,29 @@ impl WindowManager {
             }
             
             if let Some(window) = &mut self.windows[self.drag.window_id] {
+                let is_on_top = self.z_order[self.window_count - 1] == self.drag.window_id;
+                
                 if self.drag.mode == InteractionMode::Dragging {
                     // Move window to final position
                     let new_x = mx - self.drag.offset_x;
                     let new_y = my - self.drag.offset_y;
                     window.bounds.x = new_x;
                     window.bounds.y = new_y;
+                    
+                    // Only redraw the moved window if it's on top
+                    // (windows below are handled by RectFromWindow)
+                    if is_on_top {
+                        self.dirty_regions.push(DirtyRegion::FullWindow(self.drag.window_id));
+                    }
                 } else if self.drag.mode == InteractionMode::Resizing {
                     // Resize window
                     let new_w = (mx - window.bounds.x).max(Window::MIN_WIDTH as i32) as usize;
                     let new_h = (my - window.bounds.y).max(Window::MIN_HEIGHT as i32) as usize;
                     window.bounds.width = new_w;
                     window.bounds.height = new_h;
+                    // Always redraw on resize
+                    self.dirty_regions.push(DirtyRegion::FullWindow(self.drag.window_id));
                 }
-                // New bounds are dirty - full window redraw needed
-                self.dirty_regions.push(DirtyRegion::FullWindow(self.drag.window_id));
             }
             
             self.drag.mode = InteractionMode::None;
@@ -994,14 +1002,9 @@ impl WindowManager {
                     // Only change z-order if not already on top
                     if !already_on_top {
                         self.bring_to_front(i);
-                        // Z-order changed - need to redraw overlapping windows
-                        for j in 0..self.window_count {
-                            if let Some(w) = &self.windows[j] {
-                                if w.visible && w.bounds.intersects(&bounds) {
-                                    self.dirty_regions.push(DirtyRegion::FullWindow(j));
-                                }
-                            }
-                        }
+                        // Only redraw the window that was brought to front
+                        // It will be drawn on top of everything
+                        self.dirty_regions.push(DirtyRegion::FullWindow(i));
                         return (true, false);
                     }
                     
@@ -1015,14 +1018,14 @@ impl WindowManager {
     }
     
     /// Route keyboard input to the focused (topmost) window
-    pub fn handle_keyboard_input(&mut self, key: char) {
+    pub fn handle_keyboard_input(&mut self, key: char, ctrl: bool) {
         // Send to the topmost visible window
         if self.window_count > 0 {
             let topmost_idx = self.z_order[self.window_count - 1];
             if let Some(window) = &mut self.windows[topmost_idx] {
                 if window.visible {
-                    // Call the handler
-                    window.handle_key(key, false);
+                    // Call the handler with ctrl state
+                    window.handle_key(key, ctrl);
                     
                     // Choose the most efficient redraw region based on the key
                     if key == '\n' || key == '\r' {

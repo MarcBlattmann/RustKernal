@@ -46,8 +46,8 @@ impl Desktop {
     }
     
     /// Handle keyboard input, route to active window
-    pub fn handle_keyboard_input(&mut self, key: char) {
-        self.window_manager.handle_keyboard_input(key);
+    pub fn handle_keyboard_input(&mut self, key: char, ctrl: bool) {
+        self.window_manager.handle_keyboard_input(key, ctrl);
     }
     
     /// Handle special key input (arrows, function keys, etc.)

@@ -1053,8 +1053,15 @@ impl FileExplorer {
     }
 
     pub fn create_file(&mut self, name: &str) -> bool {
+        // Create file with full path based on current directory
+        let full_path = if self.current_path == "/" {
+            format!("/{}", name)
+        } else {
+            format!("{}/{}", self.current_path, name)
+        };
+        
         let mut fs = FILESYSTEM.lock();
-        if fs.create_file(String::from(name)) {
+        if fs.create_file(full_path) {
             drop(fs);
             self.refresh();
             true
@@ -1064,8 +1071,15 @@ impl FileExplorer {
     }
 
     pub fn create_directory(&mut self, name: &str) -> bool {
+        // Create directory with full path based on current directory
+        let full_path = if self.current_path == "/" {
+            format!("/{}", name)
+        } else {
+            format!("{}/{}", self.current_path, name)
+        };
+        
         let mut fs = FILESYSTEM.lock();
-        if fs.create_directory(String::from(name)) {
+        if fs.create_directory(full_path) {
             drop(fs);
             self.refresh();
             true
@@ -1076,9 +1090,20 @@ impl FileExplorer {
 
     pub fn delete_selected(&mut self) -> bool {
         if let Some(entry) = self.get_selected() {
-            let name = entry.name.clone();
+            // Skip ".." entry
+            if entry.name == ".." {
+                return false;
+            }
+            
+            // Build full path for deletion
+            let full_path = if self.current_path == "/" {
+                format!("/{}", entry.name)
+            } else {
+                format!("{}/{}", self.current_path, entry.name)
+            };
+            
             let mut fs = FILESYSTEM.lock();
-            if fs.delete_file(&name) {
+            if fs.delete_file(&full_path) {
                 drop(fs);
                 self.refresh();
                 return true;

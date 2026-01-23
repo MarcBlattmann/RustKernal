@@ -50,14 +50,22 @@ pub fn run_gui(screen: &mut Screen) {
         
         // Poll keyboard input - route to active window (process ONE char per frame)
         // The window manager will add dirty rects automatically when handling keyboard input
+        let ctrl = keyboard::is_ctrl_pressed();
+        
         if let Some(c) = keyboard::try_read_char() {
             let char_code = c as u32;
             if char_code >= 32 && char_code < 127 {
                 // Printable character - pass it through
-                desktop.handle_keyboard_input(c);
+                desktop.handle_keyboard_input(c, ctrl);
             } else if c == '\n' || c == '\r' || c == '\x08' {
                 // Control character - pass it through
-                desktop.handle_keyboard_input(c);
+                desktop.handle_keyboard_input(c, ctrl);
+            }
+        } else if ctrl {
+            // No char in buffer but Ctrl is pressed - check for Ctrl+letter combos
+            // by polling the raw scancode
+            if let Some(key) = keyboard::try_read_ctrl_combo() {
+                desktop.handle_keyboard_input(key, true);
             }
         }
         

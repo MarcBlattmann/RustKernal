@@ -153,6 +153,24 @@ pub fn handle_scancode(scancode: u8) {
         (state.shift_pressed, state.ctrl_pressed, state.alt_pressed)
     };
     
+    // Handle Ctrl+key combos separately
+    if ctrl {
+        // Convert scancode to letter for Ctrl combos
+        let letter = match key_code {
+            0x1F => Some('s'), // S
+            0x1E => Some('a'), // A
+            0x2E => Some('c'), // C
+            0x2F => Some('v'), // V
+            0x2D => Some('x'), // X
+            0x2C => Some('z'), // Z (or Y on Swiss)
+            _ => None,
+        };
+        if let Some(c) = letter {
+            CTRL_COMBO_BUFFER.lock().push(c);
+            return;
+        }
+    }
+    
     if let Some(character) = scancode_to_char_swiss(scancode, shift, alt) {
         INPUT_BUFFER.lock().push(character);
     }
@@ -168,6 +186,53 @@ pub fn read_scancode() -> u8 {
 
 pub fn try_read_char() -> Option<char> {
     INPUT_BUFFER.lock().pop().map(|b| b as char)
+}
+
+/// Check if Ctrl key is currently pressed
+pub fn is_ctrl_pressed() -> bool {
+    KEYBOARD_STATE.lock().ctrl_pressed
+}
+
+/// Buffer for Ctrl+key combos
+static CTRL_COMBO_BUFFER: Mutex<CtrlComboBuffer> = Mutex::new(CtrlComboBuffer::new());
+
+struct CtrlComboBuffer {
+    buffer: [Option<char>; 16],
+    write_position: usize,
+    read_position: usize,
+}
+
+impl CtrlComboBuffer {
+    const fn new() -> Self {
+        Self {
+            buffer: [None; 16],
+            write_position: 0,
+            read_position: 0,
+        }
+    }
+    
+    fn push(&mut self, key: char) {
+        let next_position = (self.write_position + 1) % self.buffer.len();
+        if next_position != self.read_position {
+            self.buffer[self.write_position] = Some(key);
+            self.write_position = next_position;
+        }
+    }
+    
+    fn pop(&mut self) -> Option<char> {
+        if self.read_position == self.write_position {
+            None
+        } else {
+            let key = self.buffer[self.read_position].take();
+            self.read_position = (self.read_position + 1) % self.buffer.len();
+            key
+        }
+    }
+}
+
+/// Try to read a Ctrl+key combo (e.g., Ctrl+S)
+pub fn try_read_ctrl_combo() -> Option<char> {
+    CTRL_COMBO_BUFFER.lock().pop()
 }
 
 /// Try to read a special key from the buffer
@@ -284,8 +349,9 @@ fn scancode_to_char_swiss(scancode: u8, shift: bool, altgr: bool) -> Option<u8> 
         0x2B => if altgr { b'}' } else if shift { b'*' } else { b'\\' },
         
         // Comma, Period, Minus
-        0x33 => if shift { b';' } else { b',' },    // , ;
-        0x34 => if shift { b':' } else { b'.' },    // . :
+        // Shift+comma = <, Shift+period = > (US-style, works better in QEMU)
+        0x33 => if shift { b'<' } else if altgr { b'<' } else { b',' },    // , < <
+        0x34 => if shift { b'>' } else if altgr { b'>' } else { b'.' },    // . > >
         0x35 => if shift { b'_' } else { b'-' },    // - _
         
         // Key next to right shift: < > | (scancode 0x56 - the 102nd key)
