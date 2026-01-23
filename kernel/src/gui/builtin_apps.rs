@@ -703,14 +703,9 @@ impl FileExplorer {
             }
         }
 
-        // Add embedded apps from kernel only at root
-        if self.current_path == "/" {
-            self.entries.push(FileEntry {
-                name: String::from("about.pa"),
-                is_dir: false,
-                size: 0,
-            });
-        }
+        // Note: Removed hardcoded about.pa virtual entry
+        // The about app is now loaded from the embedded apps via pa_parser
+        // If you want about.pa visible in explorer, create it in the filesystem
 
         if self.selected_index >= self.entries.len() && !self.entries.is_empty() {
             self.selected_index = self.entries.len() - 1;
@@ -749,8 +744,8 @@ impl FileExplorer {
         self.entries.get(self.selected_index)
     }
     
-    /// Handle keyboard input
-    pub fn handle_key(&mut self, key: char) {
+    /// Handle keyboard input - returns action if file should be opened
+    pub fn handle_key(&mut self, key: char) -> ExplorerAction {
         // If in input mode, handle text input
         if let Some(mode) = self.input_mode {
             match key {
@@ -782,7 +777,7 @@ impl FileExplorer {
                 }
                 _ => {}
             }
-            return;
+            return ExplorerAction::None;
         }
         
         // Handle context menu
@@ -795,14 +790,14 @@ impl FileExplorer {
                     self.context_menu_visible = false;
                 }
             }
-            return;
+            return ExplorerAction::None;
         }
         
         // Normal mode shortcuts
         match key {
             '\n' | '\r' => {
                 // Enter - activate selected (open file or enter folder)
-                self.activate_selected();
+                return self.activate_selected();
             }
             '\x08' => {
                 // Backspace - go up one directory
@@ -832,6 +827,7 @@ impl FileExplorer {
             }
             _ => {}
         }
+        ExplorerAction::None
     }
     
     /// Handle special keys
@@ -970,20 +966,15 @@ impl FileExplorer {
             let rel_y = y - list_y;
             let clicked_index = self.scroll_offset + (rel_y / item_height) as usize;
             if clicked_index < self.entries.len() {
-                // Check for double-click (same item clicked twice)
-                if self.last_click_index == Some(clicked_index) {
-                    self.click_count += 1;
-                    if self.click_count >= 2 {
-                        // Double-click - open file or navigate to folder
-                        self.click_count = 0;
-                        self.last_click_index = None;
-                        return (true, self.activate_selected());
-                    }
+                // Check for double-click (clicking on already selected item)
+                if self.selected_index == clicked_index && self.last_click_index == Some(clicked_index) {
+                    // Second click on same item - open it
+                    self.last_click_index = None;
+                    return (true, self.activate_selected());
                 } else {
-                    // Single click on new item - select it
+                    // First click - select the item
                     self.selected_index = clicked_index;
                     self.last_click_index = Some(clicked_index);
-                    self.click_count = 1;
                 }
                 return (true, ExplorerAction::None);
             }

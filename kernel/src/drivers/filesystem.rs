@@ -128,6 +128,9 @@ impl Superblock {
     }
 }
 
+/// Maximum in-memory file data size (for when disk is not available)
+const MAX_INMEM_DATA: usize = 64 * 1024; // 64KB for in-memory file storage
+
 /// Simple Filesystem structure
 pub struct SimpleFS {
     initialized: bool,
@@ -136,6 +139,8 @@ pub struct SimpleFS {
     superblock: Superblock,
     fat: [u8; FAT_SECTORS as usize * SECTOR_SIZE],
     entries: [DirEntry; 128],
+    // In-memory file data storage (used when disk is not available)
+    inmem_data: Vec<u8>,
 }
 
 impl SimpleFS {
@@ -146,6 +151,7 @@ impl SimpleFS {
             superblock: Superblock::new(),
             fat: [0; FAT_SECTORS as usize * SECTOR_SIZE],
             entries: [DirEntry::empty(); 128],
+            inmem_data: Vec::new(),
         }
     }
 
@@ -394,36 +400,37 @@ impl SimpleFS {
             None => return false,
         };
         
-        // Free existing blocks
-        let old_first_block = self.entries[entry_idx].first_block;
-        let old_block_count = self.entries[entry_idx].block_count;
-        for i in 0..old_block_count {
-            self.free_block(old_first_block + i);
-        }
-        
-        // Calculate blocks needed
-        let blocks_needed = (data.len() + SECTOR_SIZE - 1) / SECTOR_SIZE;
-        if blocks_needed > BLOCKS_PER_FILE {
-            return false;
-        }
-        
-        // Allocate new blocks
-        let first_block = if blocks_needed > 0 {
-            match self.allocate_block() {
-                Some(b) => b,
-                None => return false,
-            }
-        } else {
-            0
-        };
-        
-        // Allocate consecutive blocks
-        for i in 1..blocks_needed {
-            let _ = self.allocate_block();
-        }
-        
-        // Write data to blocks
         if self.use_disk {
+            // Disk-based storage
+            // Free existing blocks
+            let old_first_block = self.entries[entry_idx].first_block;
+            let old_block_count = self.entries[entry_idx].block_count;
+            for i in 0..old_block_count {
+                self.free_block(old_first_block + i);
+            }
+            
+            // Calculate blocks needed
+            let blocks_needed = (data.len() + SECTOR_SIZE - 1) / SECTOR_SIZE;
+            if blocks_needed > BLOCKS_PER_FILE {
+                return false;
+            }
+            
+            // Allocate new blocks
+            let first_block = if blocks_needed > 0 {
+                match self.allocate_block() {
+                    Some(b) => b,
+                    None => return false,
+                }
+            } else {
+                0
+            };
+            
+            // Allocate consecutive blocks
+            for i in 1..blocks_needed {
+                let _ = self.allocate_block();
+            }
+            
+            // Write data to blocks
             for i in 0..blocks_needed {
                 let mut sector_data = [0u8; SECTOR_SIZE];
                 let start = i * SECTOR_SIZE;
@@ -435,15 +442,26 @@ impl SimpleFS {
                     return false;
                 }
             }
+            
+            // Update entry
+            self.entries[entry_idx].size = data.len() as u32;
+            self.entries[entry_idx].first_block = first_block;
+            self.entries[entry_idx].block_count = blocks_needed as u32;
+            
+            // Save metadata
+            let _ = self.save_to_disk();
+        } else {
+            // In-memory storage - store data offset in first_block field
+            let data_offset = self.inmem_data.len();
+            
+            // Append data to in-memory buffer
+            self.inmem_data.extend_from_slice(data);
+            
+            // Update entry - use first_block as offset into inmem_data
+            self.entries[entry_idx].size = data.len() as u32;
+            self.entries[entry_idx].first_block = data_offset as u32;
+            self.entries[entry_idx].block_count = 1; // Mark as having data
         }
-        
-        // Update entry
-        self.entries[entry_idx].size = data.len() as u32;
-        self.entries[entry_idx].first_block = first_block;
-        self.entries[entry_idx].block_count = blocks_needed as u32;
-        
-        // Save metadata
-        let _ = self.save_to_disk();
         
         true
     }
@@ -464,6 +482,7 @@ impl SimpleFS {
         let mut data = Vec::with_capacity(entry.size as usize);
         
         if self.use_disk {
+            // Read from disk
             for i in 0..entry.block_count {
                 let sector = DATA_START_SECTOR + entry.first_block + i;
                 match ata::AtaDevice::read_sector(sector) {
@@ -474,6 +493,13 @@ impl SimpleFS {
                     }
                     Err(_) => return None,
                 }
+            }
+        } else {
+            // Read from in-memory storage
+            let offset = entry.first_block as usize;
+            let size = entry.size as usize;
+            if offset + size <= self.inmem_data.len() {
+                data.extend_from_slice(&self.inmem_data[offset..offset + size]);
             }
         }
         
@@ -504,17 +530,34 @@ impl SimpleFS {
         true
     }
 
-    /// List all files and directories
+    /// List all files and directories at the root level
+    /// For files like "docs/vbox.md", only returns "docs" as a directory
     pub fn list_files(&self) -> Vec<(String, bool)> {
-        let mut files = Vec::new();
+        let mut items: Vec<(String, bool)> = Vec::new();
+        let mut seen_dirs: Vec<String> = Vec::new();
         
         for entry in &self.entries {
-            if !entry.is_empty() {
-                files.push((entry.get_name(), entry.is_directory()));
+            if entry.is_empty() {
+                continue;
+            }
+            
+            let name = entry.get_name();
+            
+            // Check if this is a top-level item or needs to be represented as a folder
+            if let Some(slash_pos) = name.find('/') {
+                // Has a path separator - extract top-level folder name
+                let folder_name = &name[..slash_pos];
+                if !folder_name.is_empty() && !seen_dirs.contains(&folder_name.to_string()) {
+                    seen_dirs.push(folder_name.to_string());
+                    items.push((folder_name.to_string(), true));
+                }
+            } else {
+                // No path separator - this is a root-level file
+                items.push((name, entry.is_directory()));
             }
         }
         
-        files
+        items
     }
     
     /// List files and directories in a specific directory path

@@ -313,13 +313,14 @@ impl Window {
     }
     
     /// Handle keyboard input for native apps
-    pub fn handle_key(&mut self, key: char, ctrl: bool) {
+    /// Returns ExplorerAction for file explorer (to open files)
+    pub fn handle_key(&mut self, key: char, ctrl: bool) -> ExplorerAction {
         match &mut self.native_app {
-            NativeApp::Editor(editor) => editor.handle_key(key, ctrl),
-            NativeApp::Terminal(terminal) => terminal.handle_key(key),
-            NativeApp::Docs(docs) => docs.handle_key(key),
+            NativeApp::Editor(editor) => { editor.handle_key(key, ctrl); ExplorerAction::None },
+            NativeApp::Terminal(terminal) => { terminal.handle_key(key); ExplorerAction::None },
+            NativeApp::Docs(docs) => { docs.handle_key(key); ExplorerAction::None },
             NativeApp::Explorer(explorer) => explorer.handle_key(key),
-            _ => {}
+            _ => ExplorerAction::None
         }
     }
     
@@ -1025,7 +1026,18 @@ impl WindowManager {
             if let Some(window) = &mut self.windows[topmost_idx] {
                 if window.visible {
                     // Call the handler with ctrl state
-                    window.handle_key(key, ctrl);
+                    let action = window.handle_key(key, ctrl);
+                    
+                    // Handle explorer actions (open file)
+                    match action {
+                        ExplorerAction::OpenFile(filepath) => {
+                            self.pending_action = Some((topmost_idx, ScriptAction::Open(filepath)));
+                        }
+                        ExplorerAction::NavigateToDir(_) => {
+                            // Navigation handled inside explorer
+                        }
+                        ExplorerAction::None => {}
+                    }
                     
                     // Choose the most efficient redraw region based on the key
                     if key == '\n' || key == '\r' {
