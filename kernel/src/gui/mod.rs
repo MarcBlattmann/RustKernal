@@ -7,6 +7,7 @@
 //! - `widgets`: Reusable UI components
 //! - `app`: Declarative app builder system (HTML-like)
 //! - `script`: PursuitScript interpreter for app logic
+//! - `builtin_apps`: Native apps (Editor, Explorer, Terminal, Docs)
 
 pub mod cursor;
 pub mod window;
@@ -18,9 +19,10 @@ pub mod pa_parser;
 pub mod layout;
 pub mod start_menu;
 pub mod script;
+pub mod builtin_apps;
 
 use crate::drivers::display::screen::Screen;
-use crate::drivers::mouse;
+use crate::drivers::{mouse, keyboard};
 
 /// Main GUI entry point
 pub fn run_gui(screen: &mut Screen) {
@@ -46,9 +48,27 @@ pub fn run_gui(screen: &mut Screen) {
             mouse::poll();
         }
         
+        // Poll keyboard input - route to active window (process ONE char per frame)
+        // The window manager will add dirty rects automatically when handling keyboard input
+        if let Some(c) = keyboard::try_read_char() {
+            let char_code = c as u32;
+            if char_code >= 32 && char_code < 127 {
+                // Printable character - pass it through
+                desktop.handle_keyboard_input(c);
+            } else if c == '\n' || c == '\r' || c == '\x08' {
+                // Control character - pass it through
+                desktop.handle_keyboard_input(c);
+            }
+        }
+        
+        // Poll special keys (arrows, function keys, etc.)
+        if let Some(special) = keyboard::try_read_special_key() {
+            desktop.handle_special_key_input(special);
+        }
+        
         // Get mouse state
         let (mx, my) = mouse::get_position();
-        let (left_pressed, _, _) = mouse::get_buttons();
+        let (left_pressed, right_pressed, _) = mouse::get_buttons();
         
         // Check dragging state BEFORE handling input
         let was_dragging = desktop.is_dragging();
@@ -79,13 +99,13 @@ pub fn run_gui(screen: &mut Screen) {
             // Drag just ended - do partial redraw if possible
             if needs_redraw {
                 // Get dirty regions and do efficient partial redraw
-                let dirty_rects = desktop.take_dirty_rects();
-                if dirty_rects.is_empty() {
-                    // Fallback to full redraw if no dirty rects tracked
+                let dirty_regions = desktop.take_dirty_regions();
+                if dirty_regions.is_empty() {
+                    // Fallback to full redraw if no dirty regions tracked
                     desktop.render(screen);
                 } else {
-                    // Clear and redraw only dirty regions
-                    desktop.render_dirty(screen, &dirty_rects);
+                    // Smart redraw: ContentOnly for keyboard, FullWindow for resize/move
+                    desktop.render_dirty_regions(screen, &dirty_regions);
                 }
             }
             cursor::draw_at(screen, mx, my);
@@ -93,23 +113,28 @@ pub fn run_gui(screen: &mut Screen) {
             // Still dragging - don't draw cursor
         } else {
             // Normal operation - not dragging
-            // First check for label-only updates (flicker-free, no background clear)
-            if desktop.has_label_updates() {
-                desktop.render_label_updates(screen);
+            
+            // Process any pending actions (e.g., opening files from file explorer)
+            desktop.process_pending_actions();
+            
+            // Always check for dirty regions first (keyboard, mouse, etc may have added them)
+            let dirty_regions = desktop.take_dirty_regions();
+            
+            if !dirty_regions.is_empty() {
+                // Smart redraw using DirtyRegion types:
+                // - ContentOnly: Just re-render content area (efficient for typing)
+                // - FullWindow: Re-render entire window (for resize/move)
+                // - Rect: Arbitrary area (for closed windows, etc.)
+                desktop.render_dirty_regions(screen, &dirty_regions);
             } else if needs_redraw || cursor_changed {
-                // Get dirty regions for partial redraw
-                let dirty_rects = desktop.take_dirty_rects();
-                if dirty_rects.is_empty() && needs_redraw {
-                    desktop.render(screen);
-                } else if !dirty_rects.is_empty() {
-                    desktop.render_dirty(screen, &dirty_rects);
-                }
+                // No dirty regions but something changed - full redraw
+                desktop.render(screen);
             }
             cursor::show_at(screen, mx, my);
         }
         
-        // Small delay to prevent CPU spinning
-        for _ in 0..3000 {
+        // Small delay to prevent CPU spinning (reduced for better responsiveness)
+        for _ in 0..1000 {
             core::hint::spin_loop();
         }
     }

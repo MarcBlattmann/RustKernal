@@ -5,6 +5,7 @@
 //! - Dragging support with XOR outline
 //! - Dirty rectangle tracking for efficient redraws
 //! - PursuitScript support for button click handlers
+//! - Native app hosting (Editor, Terminal, Explorer, Docs)
 
 use alloc::string::String;
 use crate::drivers::display::screen::Screen;
@@ -12,9 +13,44 @@ use super::theme::*;
 use super::widgets::{Rect, draw_filled_rect, draw_filled_rect_clipped, draw_rect_border, draw_rect_border_clipped, draw_text, draw_text_clipped, draw_close_button, draw_xor_outline};
 use super::app::{AppDef, Element};
 use super::script::{ScriptEngine, ScriptAction};
+use super::builtin_apps::{CodeEditor, FileExplorer, TerminalEmulator, DocViewer, SpecialKey, ExplorerAction};
 
 /// Maximum number of windows
 const MAX_WINDOWS: usize = 8;
+
+/// Types of dirty regions for efficient partial redraws
+#[derive(Clone, Copy)]
+pub enum DirtyRegion {
+    /// Full window needs redraw (moved, resized, opened, etc.)
+    FullWindow(usize), // window_id
+    /// Only content area needs redraw (scroll, command output, etc.)
+    ContentOnly(usize), // window_id
+    /// Only the typing/input area needs redraw (single char typed)
+    TypingOnly(usize), // window_id
+    /// Arbitrary rectangle from a window move (only redraw windows below source_window_id in z-order)
+    RectFromWindow(Rect, usize), // rect, source_window_id
+    /// Arbitrary rectangle - redraw all overlapping windows (e.g., area behind closed window)
+    Rect(Rect),
+}
+
+/// Types of native apps
+#[derive(Clone, Copy, PartialEq)]
+pub enum NativeAppType {
+    None,
+    CodeEditor,
+    FileExplorer,
+    Terminal,
+    DocViewer,
+}
+
+/// Native app state container
+pub enum NativeApp {
+    None,
+    Editor(CodeEditor),
+    Explorer(FileExplorer),
+    Terminal(TerminalEmulator),
+    Docs(DocViewer),
+}
 
 /// Cached position of a rendered label that uses variable interpolation
 #[derive(Clone)]
@@ -37,6 +73,10 @@ pub struct Window {
     pub script: ScriptEngine,
     /// Cached positions of labels with {variables} for partial redraws
     dynamic_labels: alloc::vec::Vec<DynamicLabel>,
+    /// Native app type
+    pub native_type: NativeAppType,
+    /// Native app state
+    pub native_app: NativeApp,
 }
 
 impl Window {
@@ -51,6 +91,8 @@ impl Window {
             original_height: height,
             script: ScriptEngine::new(),
             dynamic_labels: alloc::vec::Vec::new(),
+            native_type: NativeAppType::None,
+            native_app: NativeApp::None,
         }
     }
     
@@ -73,7 +115,39 @@ impl Window {
             original_height: app.height,
             script,
             dynamic_labels: alloc::vec::Vec::new(),
+            native_type: NativeAppType::None,
+            native_app: NativeApp::None,
         }
+    }
+    
+    /// Create a native app window
+    pub fn from_native(id: usize, app: &AppDef, native_type: NativeAppType) -> Self {
+        let native_app = match native_type {
+            NativeAppType::CodeEditor => NativeApp::Editor(CodeEditor::new()),
+            NativeAppType::FileExplorer => NativeApp::Explorer(FileExplorer::new()),
+            NativeAppType::Terminal => NativeApp::Terminal(TerminalEmulator::new()),
+            NativeAppType::DocViewer => NativeApp::Docs(DocViewer::new()),
+            NativeAppType::None => NativeApp::None,
+        };
+        
+        Self {
+            id,
+            title: app.title.clone(),
+            bounds: Rect::new(app.x, app.y, app.width, app.height),
+            visible: app.visible,
+            elements: alloc::vec::Vec::new(),
+            original_width: app.width,
+            original_height: app.height,
+            script: ScriptEngine::new(),
+            dynamic_labels: alloc::vec::Vec::new(),
+            native_type,
+            native_app,
+        }
+    }
+    
+    /// Check if this is a native app window
+    pub fn is_native(&self) -> bool {
+        self.native_type != NativeAppType::None
     }
     
     /// Get title bar bounds
@@ -155,6 +229,19 @@ impl Window {
         let content = self.content_bounds();
         let clip = content;
         
+        // Check if this is a native app window
+        if self.is_native() {
+            // Render native app content
+            match &self.native_app {
+                NativeApp::Editor(editor) => editor.render(screen, &content),
+                NativeApp::Explorer(explorer) => explorer.render(screen, &content),
+                NativeApp::Terminal(terminal) => terminal.render(screen, &content),
+                NativeApp::Docs(docs) => docs.render(screen, &content),
+                NativeApp::None => {}
+            }
+            return;
+        }
+        
         // Clear cached dynamic labels - they'll be rebuilt during render
         self.dynamic_labels.clear();
         
@@ -164,6 +251,107 @@ impl Window {
         // Render elements - layout containers fill the content area
         for elem in &elements {
             self.render_element(screen, elem, content.x, content.y, content.width, content.height, &clip);
+        }
+    }
+    
+    /// Render ONLY the content area (not titlebar or borders)
+    /// Used for efficient partial updates when only content changed (e.g., keyboard input)
+    pub fn render_content_only(&mut self, screen: &mut Screen) {
+        if !self.visible {
+            return;
+        }
+        
+        let content = self.content_bounds();
+        
+        // Check if this is a native app window
+        if self.is_native() {
+            // Render native app content only
+            match &self.native_app {
+                NativeApp::Editor(editor) => editor.render(screen, &content),
+                NativeApp::Explorer(explorer) => explorer.render(screen, &content),
+                NativeApp::Terminal(terminal) => terminal.render(screen, &content),
+                NativeApp::Docs(docs) => docs.render(screen, &content),
+                NativeApp::None => {}
+            }
+            return;
+        }
+        
+        // For non-native apps, fill content background and re-render elements
+        draw_filled_rect(screen, &content, COLOR_WINDOW_BG);
+        
+        // Clear cached dynamic labels - they'll be rebuilt during render
+        self.dynamic_labels.clear();
+        
+        // Clone elements to avoid borrow checker issues with &mut self
+        let elements = self.elements.clone();
+        let clip = content;
+        
+        // Render elements
+        for elem in &elements {
+            self.render_element(screen, elem, content.x, content.y, content.width, content.height, &clip);
+        }
+    }
+    
+    /// Render ONLY the typing area - minimal update for keyboard input
+    /// This is the most efficient update for single character typing
+    pub fn render_typing_area_only(&mut self, screen: &mut Screen) {
+        if !self.visible {
+            return;
+        }
+        
+        let content = self.content_bounds();
+        
+        // Only native apps have optimized single-line rendering
+        match &self.native_app {
+            NativeApp::Editor(editor) => editor.render_cursor_line(screen, &content),
+            NativeApp::Terminal(terminal) => terminal.render_input_line(screen, &content),
+            NativeApp::Docs(_) | NativeApp::Explorer(_) | NativeApp::None => {
+                // These don't have typing areas - fall back to full content render
+                self.render_content_only(screen);
+            }
+        }
+    }
+    
+    /// Handle keyboard input for native apps
+    pub fn handle_key(&mut self, key: char, ctrl: bool) {
+        match &mut self.native_app {
+            NativeApp::Editor(editor) => editor.handle_key(key, ctrl),
+            NativeApp::Terminal(terminal) => terminal.handle_key(key),
+            NativeApp::Docs(docs) => docs.handle_key(key),
+            NativeApp::Explorer(explorer) => explorer.handle_key(key),
+            _ => {}
+        }
+    }
+    
+    /// Handle special key input for native apps
+    pub fn handle_special_key(&mut self, key: SpecialKey) {
+        match &mut self.native_app {
+            NativeApp::Editor(editor) => editor.handle_special_key(key),
+            NativeApp::Terminal(terminal) => terminal.handle_special_key(key),
+            NativeApp::Explorer(explorer) => explorer.handle_special_key(key),
+            NativeApp::Docs(docs) => {
+                match key {
+                    SpecialKey::Up => docs.scroll(-1),
+                    SpecialKey::Down => docs.scroll(1),
+                    SpecialKey::PageUp => docs.scroll(-10),
+                    SpecialKey::PageDown => docs.scroll(10),
+                    SpecialKey::Home => docs.scroll_to_top(),
+                    SpecialKey::End => docs.scroll_to_bottom(),
+                    _ => {}
+                }
+            }
+            NativeApp::None => {}
+        }
+    }
+    
+    /// Handle mouse click for native apps (file explorer, etc.)
+    /// Returns (needs_redraw, explorer_action)
+    pub fn handle_native_click(&mut self, mx: i32, my: i32, right_button: bool) -> (bool, ExplorerAction) {
+        let content = self.content_bounds();
+        
+        match &mut self.native_app {
+            NativeApp::Explorer(explorer) => explorer.handle_click(mx, my, &content, right_button),
+            _ => (false, ExplorerAction::None)
         }
     }
     
@@ -484,8 +672,8 @@ pub struct WindowManager {
     z_order: [usize; MAX_WINDOWS],
     drag: DragState,
     last_mouse_down: bool,
-    /// Dirty regions to redraw
-    dirty_rects: alloc::vec::Vec<Rect>,
+    /// Dirty regions to redraw (using DirtyRegion for smarter partial updates)
+    dirty_regions: alloc::vec::Vec<DirtyRegion>,
     /// Pending action from script (window_id, action)
     pending_action: Option<(usize, ScriptAction)>,
     /// Windows that need only dynamic label updates (no full redraw)
@@ -508,7 +696,7 @@ impl WindowManager {
                 original_bounds: None,
             },
             last_mouse_down: false,
-            dirty_rects: alloc::vec::Vec::new(),
+            dirty_regions: alloc::vec::Vec::new(),
             pending_action: None,
             label_update_windows: alloc::vec::Vec::new(),
         }
@@ -565,6 +753,19 @@ impl WindowManager {
         Some(id)
     }
     
+    /// Add a native app window
+    pub fn add_native_app(&mut self, app: &AppDef, native_type: NativeAppType) -> Option<usize> {
+        if self.window_count >= MAX_WINDOWS {
+            return None;
+        }
+        
+        let id = self.window_count;
+        self.windows[id] = Some(Window::from_native(id, app, native_type));
+        self.z_order[self.window_count] = id; // Add to top of z-order
+        self.window_count += 1;
+        Some(id)
+    }
+    
     /// Add a simple window
     pub fn add_window(&mut self, title: &str, x: i32, y: i32, width: usize, height: usize) -> Option<usize> {
         if self.window_count >= MAX_WINDOWS {
@@ -576,6 +777,20 @@ impl WindowManager {
         self.z_order[self.window_count] = id; // Add to top of z-order
         self.window_count += 1;
         Some(id)
+    }
+    
+    /// Open a file in an existing code editor window
+    pub fn open_file_in_editor(&mut self, window_id: usize, filepath: &str, content: &str) {
+        if let Some(window) = &mut self.windows[window_id] {
+            if let NativeApp::Editor(editor) = &mut window.native_app {
+                editor.open_file(filepath, content);
+                // Update window title to show filename
+                let filename = filepath.rsplit('/').next().unwrap_or(filepath);
+                window.title.clear();
+                window.title.push_str("Code Editor - ");
+                window.title.push_str(filename);
+            }
+        }
     }
     
     /// Handle mouse input with XOR outline dragging
@@ -592,9 +807,9 @@ impl WindowManager {
                 draw_xor_outline(screen, &outline);
             }
             
-            // Track old position for dirty rect
+            // Track old position for dirty rect - with source window for smart z-order redraw
             if let Some(original) = self.drag.original_bounds.take() {
-                self.dirty_rects.push(original);
+                self.dirty_regions.push(DirtyRegion::RectFromWindow(original, self.drag.window_id));
             }
             
             if let Some(window) = &mut self.windows[self.drag.window_id] {
@@ -611,8 +826,8 @@ impl WindowManager {
                     window.bounds.width = new_w;
                     window.bounds.height = new_h;
                 }
-                // New bounds are dirty
-                self.dirty_rects.push(window.bounds);
+                // New bounds are dirty - full window redraw needed
+                self.dirty_regions.push(DirtyRegion::FullWindow(self.drag.window_id));
             }
             
             self.drag.mode = InteractionMode::None;
@@ -692,7 +907,7 @@ impl WindowManager {
                 
                 // Check close button
                 if close_bounds.contains(mx, my) {
-                    self.dirty_rects.push(bounds);
+                    self.dirty_regions.push(DirtyRegion::Rect(bounds));
                     if let Some(w) = &mut self.windows[i] {
                         w.visible = false;
                     }
@@ -723,12 +938,12 @@ impl WindowManager {
                     return (false, true); // operation_just_started = true
                 }
                 
-                // Click inside window body - check buttons first, then bring to front
+                // Click inside window body - check buttons first, then native apps, then bring to front
                 if bounds.contains(mx, my) {
                     // Check if this window is already on top
                     let already_on_top = self.z_order[self.window_count - 1] == i;
                     
-                    // Check for button clicks first
+                    // Check for button clicks first (for .pa apps)
                     let mut needs_redraw = false;
                     if let Some(window) = &mut self.windows[i] {
                         if let Some(action) = window.handle_click(mx, my) {
@@ -736,13 +951,13 @@ impl WindowManager {
                             needs_redraw = true;
                             match action {
                                 ScriptAction::Close => {
-                                    self.dirty_rects.push(bounds);
+                                    self.dirty_regions.push(DirtyRegion::Rect(bounds));
                                     window.visible = false;
                                     return (true, false);
                                 }
                                 ScriptAction::Open(app_id) => {
                                     self.pending_action = Some((i, ScriptAction::Open(app_id)));
-                                    self.dirty_rects.push(bounds);
+                                    self.dirty_regions.push(DirtyRegion::FullWindow(i));
                                 }
                                 ScriptAction::Minimize => {
                                     // Could implement minimize later
@@ -752,6 +967,26 @@ impl WindowManager {
                                     // This avoids flickering by not clearing the background
                                     self.label_update_windows.push(i);
                                 }
+                            }
+                        } else {
+                            // No button was clicked - check native app click handlers
+                            let (native_needs_redraw, explorer_action) = window.handle_native_click(mx, my, false);
+                            if native_needs_redraw {
+                                needs_redraw = true;
+                                self.dirty_regions.push(DirtyRegion::ContentOnly(i));
+                            }
+                            
+                            // Handle explorer actions
+                            match explorer_action {
+                                ExplorerAction::OpenFile(filename) => {
+                                    // Store the action to open a file
+                                    self.pending_action = Some((i, ScriptAction::Open(filename)));
+                                }
+                                ExplorerAction::NavigateToDir(_) => {
+                                    // Navigation already handled inside explorer
+                                    self.dirty_regions.push(DirtyRegion::ContentOnly(i));
+                                }
+                                ExplorerAction::None => {}
                             }
                         }
                     }
@@ -763,7 +998,7 @@ impl WindowManager {
                         for j in 0..self.window_count {
                             if let Some(w) = &self.windows[j] {
                                 if w.visible && w.bounds.intersects(&bounds) {
-                                    self.dirty_rects.push(w.bounds);
+                                    self.dirty_regions.push(DirtyRegion::FullWindow(j));
                                 }
                             }
                         }
@@ -777,6 +1012,46 @@ impl WindowManager {
         }
         
         (false, false)
+    }
+    
+    /// Route keyboard input to the focused (topmost) window
+    pub fn handle_keyboard_input(&mut self, key: char) {
+        // Send to the topmost visible window
+        if self.window_count > 0 {
+            let topmost_idx = self.z_order[self.window_count - 1];
+            if let Some(window) = &mut self.windows[topmost_idx] {
+                if window.visible {
+                    // Call the handler
+                    window.handle_key(key, false);
+                    
+                    // Choose the most efficient redraw region based on the key
+                    if key == '\n' || key == '\r' {
+                        // Enter key - command executed, need full content redraw
+                        self.dirty_regions.push(DirtyRegion::ContentOnly(topmost_idx));
+                    } else {
+                        // Regular typing - only update the input/cursor line
+                        self.dirty_regions.push(DirtyRegion::TypingOnly(topmost_idx));
+                    }
+                }
+            }
+        } else {
+            // No windows open - silently ignore
+        }
+    }
+    
+    /// Route special key input to the focused (topmost) window
+    pub fn handle_special_key_input(&mut self, key: SpecialKey) {
+        // Send to the topmost visible window
+        if self.window_count > 0 {
+            let topmost_idx = self.z_order[self.window_count - 1];
+            if let Some(window) = &mut self.windows[topmost_idx] {
+                if window.visible {
+                    window.handle_special_key(key);
+                    // Special keys usually need content redraw (scrolling, selection, etc.)
+                    self.dirty_regions.push(DirtyRegion::ContentOnly(topmost_idx));
+                }
+            }
+        }
     }
     
     /// Draw the initial XOR outline (called after cursor is hidden)
@@ -797,14 +1072,14 @@ impl WindowManager {
         }
     }
     
-    /// Take accumulated dirty rects and clear them
-    pub fn take_dirty_rects(&mut self) -> alloc::vec::Vec<Rect> {
-        core::mem::take(&mut self.dirty_rects)
+    /// Take accumulated dirty regions and clear them
+    pub fn take_dirty_regions(&mut self) -> alloc::vec::Vec<DirtyRegion> {
+        core::mem::take(&mut self.dirty_regions)
     }
     
-    /// Check if there are pending dirty rects or label updates
-    pub fn has_dirty_rects(&self) -> bool {
-        !self.dirty_rects.is_empty() || !self.label_update_windows.is_empty()
+    /// Check if there are pending dirty regions or label updates
+    pub fn has_dirty_regions(&self) -> bool {
+        !self.dirty_regions.is_empty() || !self.label_update_windows.is_empty()
     }
     
     /// Check if there are pending label-only updates
@@ -825,24 +1100,95 @@ impl WindowManager {
         }
     }
     
-    /// Render only windows that intersect with dirty regions
-    /// This is more efficient than full render for partial updates
-    pub fn render_dirty(&mut self, screen: &mut Screen, dirty: &[Rect]) {
+    /// Render only windows affected by dirty regions
+    /// Uses DirtyRegion enum for smarter partial updates:
+    /// - TypingOnly: Only re-render the input/cursor line (most efficient)
+    /// - ContentOnly: Only re-render the content area (efficient for keyboard input)
+    /// - FullWindow: Re-render the entire window (for resize, move, etc.)
+    /// - RectFromWindow: Old position of moved window - only redraw windows BELOW source in z-order
+    /// - Rect: Arbitrary rectangle area - redraw all overlapping windows
+    pub fn render_dirty_regions(&mut self, screen: &mut Screen, dirty: &[DirtyRegion]) {
         // First, handle any label-only updates (flicker-free)
         self.render_label_updates(screen);
         
-        // Render in z-order (back to front)
-        for zi in 0..self.window_count {
-            let i = self.z_order[zi];
-            if let Some(window) = &mut self.windows[i] {
-                if !window.visible {
-                    continue;
+        // Track which windows have been rendered to avoid duplicate renders
+        let mut rendered_full: [bool; MAX_WINDOWS] = [false; MAX_WINDOWS];
+        let mut rendered_content: [bool; MAX_WINDOWS] = [false; MAX_WINDOWS];
+        let mut rendered_typing: [bool; MAX_WINDOWS] = [false; MAX_WINDOWS];
+        
+        // Process dirty regions
+        for region in dirty {
+            match region {
+                DirtyRegion::TypingOnly(window_idx) => {
+                    // Most efficient - only render the typing/input line
+                    if !rendered_full[*window_idx] && !rendered_content[*window_idx] && !rendered_typing[*window_idx] {
+                        if let Some(window) = &mut self.windows[*window_idx] {
+                            if window.visible {
+                                window.render_typing_area_only(screen);
+                                rendered_typing[*window_idx] = true;
+                            }
+                        }
+                    }
                 }
-                // Check if window intersects any dirty rect
-                for d in dirty {
-                    if window.bounds.intersects(d) {
-                        window.render(screen);
-                        break; // Only render once
+                DirtyRegion::ContentOnly(window_idx) => {
+                    // Only render the content area of this window
+                    if !rendered_full[*window_idx] && !rendered_content[*window_idx] {
+                        if let Some(window) = &mut self.windows[*window_idx] {
+                            if window.visible {
+                                window.render_content_only(screen);
+                                rendered_content[*window_idx] = true;
+                            }
+                        }
+                    }
+                }
+                DirtyRegion::FullWindow(window_idx) => {
+                    // Render the entire window
+                    if !rendered_full[*window_idx] {
+                        if let Some(window) = &mut self.windows[*window_idx] {
+                            if window.visible {
+                                window.render(screen);
+                                rendered_full[*window_idx] = true;
+                            }
+                        }
+                    }
+                }
+                DirtyRegion::RectFromWindow(rect, source_window_id) => {
+                    // Only redraw windows that are BELOW the source window in z-order
+                    // Find the z-index of the source window
+                    let mut source_z_idx = 0;
+                    for zi in 0..self.window_count {
+                        if self.z_order[zi] == *source_window_id {
+                            source_z_idx = zi;
+                            break;
+                        }
+                    }
+                    
+                    // Render windows below source in z-order that overlap the rect
+                    for zi in 0..source_z_idx {
+                        let i = self.z_order[zi];
+                        if !rendered_full[i] {
+                            if let Some(window) = &mut self.windows[i] {
+                                if window.visible && window.bounds.intersects(rect) {
+                                    window.render(screen);
+                                    rendered_full[i] = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                DirtyRegion::Rect(rect) => {
+                    // Re-render any visible window that intersects this rect
+                    // Render in z-order (back to front)
+                    for zi in 0..self.window_count {
+                        let i = self.z_order[zi];
+                        if !rendered_full[i] {
+                            if let Some(window) = &mut self.windows[i] {
+                                if window.visible && window.bounds.intersects(rect) {
+                                    window.render(screen);
+                                    rendered_full[i] = true;
+                                }
+                            }
+                        }
                     }
                 }
             }

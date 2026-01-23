@@ -55,6 +55,7 @@ use alloc::vec::Vec;
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::boxed::Box;
+use crate::drivers::drives::DRIVE_MANAGER;
 
 /// Script value types
 #[derive(Clone, Debug, PartialEq)]
@@ -64,6 +65,7 @@ pub enum Value {
     Float(f64),
     Bool(bool),
     String(String),
+    Array(Vec<Value>),
 }
 
 impl Value {
@@ -75,6 +77,10 @@ impl Value {
             Value::Float(f) => format!("{}", f),
             Value::Bool(b) => if *b { String::from("true") } else { String::from("false") },
             Value::String(s) => s.clone(),
+            Value::Array(arr) => {
+                let items: Vec<String> = arr.iter().map(|v| v.to_display()).collect();
+                format!("[{}]", items.join(", "))
+            }
         }
     }
     
@@ -86,6 +92,7 @@ impl Value {
             Value::Float(f) => *f != 0.0,
             Value::Bool(b) => *b,
             Value::String(s) => !s.is_empty(),
+            Value::Array(arr) => !arr.is_empty(),
         }
     }
     
@@ -389,6 +396,208 @@ impl ScriptEngine {
                 } else {
                     Value::Int(0)
                 }
+            }
+            "listDrives" => {
+                let manager = DRIVE_MANAGER.lock();
+                let drives = manager.list_drives();
+                let arr: Vec<Value> = drives.iter()
+                    .map(|(name, _)| Value::String(name.clone()))
+                    .collect();
+                Value::Array(arr)
+            }
+            "listFiles" => {
+                if let Some(arg) = args.first() {
+                    if let Value::String(drive_name) = self.evaluate(arg) {
+                        let manager = DRIVE_MANAGER.lock();
+                        if let Some(drive) = manager.get_drive(&drive_name) {
+                            let files = drive.list_files();
+                            let arr: Vec<Value> = files.iter()
+                                .map(|(name, is_dir)| {
+                                    // Return as "name|isDir" string for simplicity
+                                    let suffix = if *is_dir { "/" } else { "" };
+                                    Value::String(format!("{}{}", name, suffix))
+                                })
+                                .collect();
+                            return Value::Array(arr);
+                        }
+                    }
+                }
+                Value::Array(Vec::new())
+            }
+            "readFile" => {
+                if args.len() >= 2 {
+                    let drive_name = match self.evaluate(&args[0]) {
+                        Value::String(s) => s,
+                        _ => return Value::Null,
+                    };
+                    let filename = match self.evaluate(&args[1]) {
+                        Value::String(s) => s,
+                        _ => return Value::Null,
+                    };
+                    let manager = DRIVE_MANAGER.lock();
+                    if let Some(drive) = manager.get_drive(&drive_name) {
+                        if let Some(data) = drive.read_file(&filename) {
+                            if let Ok(content) = core::str::from_utf8(&data) {
+                                return Value::String(String::from(content));
+                            }
+                        }
+                    }
+                }
+                Value::Null
+            }
+            "writeFile" => {
+                if args.len() >= 3 {
+                    let drive_name = match self.evaluate(&args[0]) {
+                        Value::String(s) => s,
+                        _ => return Value::Bool(false),
+                    };
+                    let filename = match self.evaluate(&args[1]) {
+                        Value::String(s) => s,
+                        _ => return Value::Bool(false),
+                    };
+                    let content = match self.evaluate(&args[2]) {
+                        Value::String(s) => s,
+                        v => v.to_display(),
+                    };
+                    let mut manager = DRIVE_MANAGER.lock();
+                    if let Some(drive) = manager.get_drive_mut(&drive_name) {
+                        return Value::Bool(drive.write_file(&filename, content.as_bytes()));
+                    }
+                }
+                Value::Bool(false)
+            }
+            "createFile" => {
+                if args.len() >= 2 {
+                    let drive_name = match self.evaluate(&args[0]) {
+                        Value::String(s) => s,
+                        _ => return Value::Bool(false),
+                    };
+                    let filename = match self.evaluate(&args[1]) {
+                        Value::String(s) => s,
+                        _ => return Value::Bool(false),
+                    };
+                    let mut manager = DRIVE_MANAGER.lock();
+                    if let Some(drive) = manager.get_drive_mut(&drive_name) {
+                        return Value::Bool(drive.create_file(&filename));
+                    }
+                }
+                Value::Bool(false)
+            }
+            "createDir" => {
+                if args.len() >= 2 {
+                    let drive_name = match self.evaluate(&args[0]) {
+                        Value::String(s) => s,
+                        _ => return Value::Bool(false),
+                    };
+                    let dirname = match self.evaluate(&args[1]) {
+                        Value::String(s) => s,
+                        _ => return Value::Bool(false),
+                    };
+                    let mut manager = DRIVE_MANAGER.lock();
+                    if let Some(drive) = manager.get_drive_mut(&drive_name) {
+                        return Value::Bool(drive.create_directory(&dirname));
+                    }
+                }
+                Value::Bool(false)
+            }
+            "deleteFile" => {
+                if args.len() >= 2 {
+                    let drive_name = match self.evaluate(&args[0]) {
+                        Value::String(s) => s,
+                        _ => return Value::Bool(false),
+                    };
+                    let filename = match self.evaluate(&args[1]) {
+                        Value::String(s) => s,
+                        _ => return Value::Bool(false),
+                    };
+                    let mut manager = DRIVE_MANAGER.lock();
+                    if let Some(drive) = manager.get_drive_mut(&drive_name) {
+                        return Value::Bool(drive.delete_file(&filename));
+                    }
+                }
+                Value::Bool(false)
+            }
+            "fileExists" => {
+                if args.len() >= 2 {
+                    let drive_name = match self.evaluate(&args[0]) {
+                        Value::String(s) => s,
+                        _ => return Value::Bool(false),
+                    };
+                    let filename = match self.evaluate(&args[1]) {
+                        Value::String(s) => s,
+                        _ => return Value::Bool(false),
+                    };
+                    let manager = DRIVE_MANAGER.lock();
+                    if let Some(drive) = manager.get_drive(&drive_name) {
+                        return Value::Bool(drive.file_exists(&filename));
+                    }
+                }
+                Value::Bool(false)
+            }
+            "fileSize" => {
+                if args.len() >= 2 {
+                    let drive_name = match self.evaluate(&args[0]) {
+                        Value::String(s) => s,
+                        _ => return Value::Int(0),
+                    };
+                    let filename = match self.evaluate(&args[1]) {
+                        Value::String(s) => s,
+                        _ => return Value::Int(0),
+                    };
+                    let manager = DRIVE_MANAGER.lock();
+                    if let Some(drive) = manager.get_drive(&drive_name) {
+                        if let Some((size, _is_dir)) = drive.get_file_info(&filename) {
+                            return Value::Int(size as i64);
+                        }
+                    }
+                }
+                Value::Int(0)
+            }
+            "isDir" => {
+                if args.len() >= 2 {
+                    let drive_name = match self.evaluate(&args[0]) {
+                        Value::String(s) => s,
+                        _ => return Value::Bool(false),
+                    };
+                    let filename = match self.evaluate(&args[1]) {
+                        Value::String(s) => s,
+                        _ => return Value::Bool(false),
+                    };
+                    let manager = DRIVE_MANAGER.lock();
+                    if let Some(drive) = manager.get_drive(&drive_name) {
+                        if let Some((_size, is_dir)) = drive.get_file_info(&filename) {
+                            return Value::Bool(is_dir);
+                        }
+                    }
+                }
+                Value::Bool(false)
+            }
+            "arrayLen" => {
+                if let Some(arg) = args.first() {
+                    if let Value::Array(arr) = self.evaluate(arg) {
+                        return Value::Int(arr.len() as i64);
+                    }
+                }
+                Value::Int(0)
+            }
+            "arrayGet" => {
+                if args.len() >= 2 {
+                    let arr = self.evaluate(&args[0]);
+                    let idx = self.evaluate(&args[1]).to_int() as usize;
+                    if let Value::Array(arr) = arr {
+                        if idx < arr.len() {
+                            return arr[idx].clone();
+                        }
+                    }
+                }
+                Value::Null
+            }
+            "concat" => {
+                let mut result = String::new();
+                for arg in args {
+                    result.push_str(&self.evaluate(arg).to_display());
+                }
+                Value::String(result)
             }
             _ => {
                 // User-defined function

@@ -426,6 +426,10 @@ impl MountedDrive {
         Some((entry.size, entry.is_directory()))
     }
 
+    pub fn file_exists(&self, name: &str) -> bool {
+        self.find_entry(name).is_some()
+    }
+
     /// Get stats
     pub fn get_stats(&self) -> (u32, u32, u32, u32) {
         (

@@ -13,6 +13,7 @@
 //! ```
 
 use alloc::string::String;
+use alloc::format;
 use super::app::{AppDef, Element};
 
 /// Parse a .pa file content into an AppDef
@@ -32,6 +33,61 @@ pub enum ParseError {
     UnknownTag,
     MismatchedClosingTag,
     NotFound,
+}
+
+impl ParseError {
+    /// Convert error to a human-readable message
+    pub fn to_message(&self) -> String {
+        match self {
+            ParseError::UnexpectedEnd => String::from("Unexpected end of file"),
+            ParseError::ExpectedTag => String::from("Expected a tag (e.g., <button>)"),
+            ParseError::ExpectedAttribute => String::from("Expected attribute (name=\"value\")"),
+            ParseError::InvalidNumber => String::from("Invalid number in attribute"),
+            ParseError::MissingAttribute(attr) => format!("Missing required attribute: {}", attr),
+            ParseError::UnknownTag => String::from("Unknown tag encountered"),
+            ParseError::MismatchedClosingTag => String::from("Mismatched closing tag"),
+            ParseError::NotFound => String::from("App not found"),
+        }
+    }
+}
+
+pub fn create_error_app(app_id: &str, error: &ParseError) -> AppDef {
+    let error_msg = error.to_message();
+    AppDef::new("Parse Error")
+        .size(350, 150)
+        .position(150, 150)
+        .element(Element::VBox { 
+            padding: 10, 
+            gap: 5, 
+            children: alloc::vec![
+                Element::Label { 
+                    text: format!("Failed to load: {}", app_id), 
+                    x: 0, 
+                    y: 0 
+                },
+                Element::Label { 
+                    text: error_msg, 
+                    x: 0, 
+                    y: 0 
+                },
+                Element::Spacer,
+                Element::HBox {
+                    padding: 0,
+                    gap: 5,
+                    children: alloc::vec![
+                        Element::Spacer,
+                        Element::Button {
+                            text: String::from("OK"),
+                            x: 0,
+                            y: 0,
+                            width: 80,
+                            height: 25,
+                            on_click: Some(String::from("close()")),
+                        },
+                    ],
+                },
+            ],
+        })
 }
 
 /// Simple PA format parser
@@ -538,9 +594,26 @@ impl<'a> PaParser<'a> {
     }
     
     fn skip_whitespace(&mut self) {
-        while let Some(c) = self.peek() {
-            if c.is_whitespace() {
-                self.advance();
+        loop {
+            // Skip regular whitespace
+            while let Some(c) = self.peek() {
+                if c.is_whitespace() {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            
+            // Skip XML comments <!-- ... -->
+            if self.input[self.pos..].starts_with("<!--") {
+                self.pos += 4; // Skip "<!--"
+                while self.pos < self.input.len() {
+                    if self.input[self.pos..].starts_with("-->") {
+                        self.pos += 3; // Skip "-->"
+                        break;
+                    }
+                    self.advance();
+                }
             } else {
                 break;
             }

@@ -152,10 +152,45 @@ pub fn create_about_app() -> AppDef {
 
 pub fn create_file_manager_app() -> AppDef {
     AppDef::new("Files")
-        .size(350, 250)
-        .position(200, 150)
-        .panel(10, 30, 330, 200)
-        .label("Documents/", 20, 50)
-        .label("Downloads/", 20, 70)
-        .label("readme.txt", 20, 90)
+        .size(400, 300)
+        .position(150, 100)
+        .panel(10, 30, 380, 250)
+        .label("File Explorer", 20, 40)
+        .label("------------------------------", 20, 55)
+        .label("[D] Documents/", 20, 75)
+        .label("[D] Downloads/", 20, 95)
+        .label("[D] Apps/", 20, 115)
+        .label("[F] readme.txt", 20, 135)
+        .label("[F] notes.txt", 20, 155)
+        .label("------------------------------", 20, 175)
+        .label("Press Enter to open", 20, 195)
+        .label("Press N for new file", 20, 215)
+}
+
+/// Create the Code Editor app
+pub fn create_code_editor_app() -> AppDef {
+    AppDef::new("Code Editor")
+        .size(600, 450)
+        .position(100, 50)
+}
+
+/// Create the Terminal app
+pub fn create_terminal_app() -> AppDef {
+    AppDef::new("Terminal")
+        .size(550, 380)
+        .position(120, 80)
+}
+
+/// Create the Documentation viewer app
+pub fn create_docs_app() -> AppDef {
+    AppDef::new("Documentation")
+        .size(500, 400)
+        .position(180, 60)
+}
+
+/// Create the enhanced File Explorer app
+pub fn create_explorer_app() -> AppDef {
+    AppDef::new("File Explorer")
+        .size(450, 350)
+        .position(140, 90)
 }

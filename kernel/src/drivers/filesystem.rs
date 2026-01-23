@@ -8,8 +8,9 @@
 //! - Data blocks (sector 17+): Actual file content
 
 use spin::Mutex;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use alloc::format;
 use crate::drivers::ata::{self, SECTOR_SIZE};
 
 /// Filesystem constants
@@ -500,6 +501,50 @@ impl SimpleFS {
         }
         
         files
+    }
+    
+    /// List files and directories in a specific directory path
+    /// Files are stored with full paths like "/folder/file.txt"
+    /// This returns just the names of items directly in the given directory
+    pub fn list_directory(&self, path: &str) -> Vec<(String, bool)> {
+        let mut items = Vec::new();
+        let prefix = if path == "/" { 
+            String::from("/") 
+        } else { 
+            format!("{}/", path.trim_end_matches('/'))
+        };
+        
+        for entry in &self.entries {
+            if entry.is_empty() {
+                continue;
+            }
+            
+            let name = entry.get_name();
+            
+            // Check if this file is directly in the given directory
+            if path == "/" {
+                // For root, we want files that start with "/" but have no other "/"
+                if name.starts_with('/') {
+                    let rest = &name[1..]; // Remove leading "/"
+                    if !rest.contains('/') {
+                        items.push((rest.to_string(), entry.is_directory()));
+                    }
+                } else if !name.contains('/') {
+                    // Files without any path separator are at root
+                    items.push((name, entry.is_directory()));
+                }
+            } else {
+                // For subdirectories, check if file starts with "path/" and has no more "/"
+                if name.starts_with(&prefix) {
+                    let rest = &name[prefix.len()..];
+                    if !rest.contains('/') && !rest.is_empty() {
+                        items.push((rest.to_string(), entry.is_directory()));
+                    }
+                }
+            }
+        }
+        
+        items
     }
 
     /// Get file info

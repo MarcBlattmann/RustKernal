@@ -6,11 +6,14 @@
 //! - Window management integration
 //! - Dirty rectangle tracking for efficient redraws
 
+use alloc::string::String;
 use alloc::vec::Vec;
 use crate::drivers::display::screen::Screen;
+use crate::drivers::keyboard::SpecialKey;
+use crate::drivers::filesystem::FILESYSTEM;
 use super::theme::*;
 use super::widgets::{Rect, draw_filled_rect, draw_rect_border, draw_text};
-use super::window::WindowManager;
+use super::window::{WindowManager, DirtyRegion};
 use super::start_menu::StartMenu;
 
 /// Desktop environment
@@ -40,6 +43,16 @@ impl Desktop {
         // Desktop starts empty - launch apps from the Start Menu
         
         desktop
+    }
+    
+    /// Handle keyboard input, route to active window
+    pub fn handle_keyboard_input(&mut self, key: char) {
+        self.window_manager.handle_keyboard_input(key);
+    }
+    
+    /// Handle special key input (arrows, function keys, etc.)
+    pub fn handle_special_key_input(&mut self, key: SpecialKey) {
+        self.window_manager.handle_special_key_input(key);
     }
     
     /// Handle input, returns (needs_redraw, operation_just_started)
@@ -102,21 +115,108 @@ impl Desktop {
     
     /// Launch an app by its ID
     fn launch_app(&mut self, app_id: &str) {
-        use super::pa_parser::load_app;
+        use super::pa_parser::{load_app, create_error_app};
+        use super::app::{create_code_editor_app, create_terminal_app, create_docs_app, create_explorer_app};
         
-        let app = if app_id == "files" {
-            // File Manager is a programmatic app, not from .pa file
-            Some(super::app::create_file_manager_app())
-        } else {
-            // Try to load from auto-detected .pa files
-            load_app(app_id).ok()
+        // Skip separator items
+        if app_id == "---" {
+            return;
+        }
+        
+        // Check for built-in native apps first
+        let app = match app_id {
+            "editor" => Ok(create_code_editor_app()),
+            "terminal" => Ok(create_terminal_app()),
+            "docs" => Ok(create_docs_app()),
+            "explorer" => Ok(create_explorer_app()),
+            "files" => Ok(super::app::create_file_manager_app()),
+            _ => {
+                // Try to load from auto-detected .pa files
+                load_app(app_id)
+            }
         };
         
-        if let Some(app) = app {
-            // Mark the new window area as dirty
-            let win_rect = Rect::new(app.x, app.y, app.width, app.height);
-            self.dirty_rects.push(win_rect);
-            self.window_manager.add_app(&app);
+        match app {
+            Ok(app_def) => {
+                // Mark the new window area as dirty
+                let win_rect = Rect::new(app_def.x, app_def.y, app_def.width, app_def.height);
+                self.dirty_rects.push(win_rect);
+                
+                // For native apps, add with special type
+                let native_type = match app_id {
+                    "editor" => Some(super::window::NativeAppType::CodeEditor),
+                    "terminal" => Some(super::window::NativeAppType::Terminal),
+                    "docs" => Some(super::window::NativeAppType::DocViewer),
+                    "explorer" => Some(super::window::NativeAppType::FileExplorer),
+                    _ => None,
+                };
+                
+                if let Some(native_type) = native_type {
+                    self.window_manager.add_native_app(&app_def, native_type);
+                } else {
+                    self.window_manager.add_app(&app_def);
+                }
+            }
+            Err(error) => {
+                // Show error dialog
+                let error_app = create_error_app(app_id, &error);
+                let win_rect = Rect::new(error_app.x, error_app.y, error_app.width, error_app.height);
+                self.dirty_rects.push(win_rect);
+                self.window_manager.add_app(&error_app);
+            }
+        }
+    }
+    
+    /// Open a file in the code editor
+    pub fn open_file_in_editor(&mut self, filepath: &str) {
+        use super::app::create_code_editor_app;
+        
+        // Read file content
+        let content = {
+            let fs = FILESYSTEM.lock();
+            if let Some(data) = fs.read_file(filepath) {
+                String::from_utf8_lossy(&data).into_owned()
+            } else {
+                String::new()
+            }
+        };
+        
+        // Create editor app
+        let app_def = create_code_editor_app();
+        
+        // Mark the window area as dirty
+        let win_rect = Rect::new(app_def.x, app_def.y, app_def.width, app_def.height);
+        self.dirty_rects.push(win_rect);
+        
+        // Add as native app and get window ID
+        if let Some(window_id) = self.window_manager.add_native_app(&app_def, super::window::NativeAppType::CodeEditor) {
+            // Open the file in the editor
+            self.window_manager.open_file_in_editor(window_id, filepath, &content);
+        }
+    }
+    
+    /// Process any pending actions from window manager (e.g., opening files)
+    pub fn process_pending_actions(&mut self) {
+        use super::script::ScriptAction;
+        
+        if let Some((_window_id, action)) = self.window_manager.take_pending_action() {
+            match action {
+                ScriptAction::Open(filepath) => {
+                    // Check if this looks like a file path (contains / or .)
+                    if filepath.contains('/') || filepath.contains('.') {
+                        self.open_file_in_editor(&filepath);
+                    } else {
+                        // It's an app ID, launch it
+                        self.launch_app(&filepath);
+                    }
+                }
+                ScriptAction::Close => {
+                    // Window was closed - already handled
+                }
+                ScriptAction::Minimize | ScriptAction::None => {
+                    // No action needed
+                }
+            }
         }
     }
     
@@ -140,33 +240,47 @@ impl Desktop {
         self.window_manager.render_label_updates(screen);
     }
     
-    /// Take dirty rects from both desktop and window manager
-    pub fn take_dirty_rects(&mut self) -> Vec<Rect> {
-        let mut rects = core::mem::take(&mut self.dirty_rects);
-        rects.extend(self.window_manager.take_dirty_rects());
-        rects
+    /// Take dirty regions from both desktop and window manager
+    pub fn take_dirty_regions(&mut self) -> Vec<DirtyRegion> {
+        let mut regions = Vec::new();
+        // Convert desktop's plain Rects to DirtyRegion::Rect
+        for rect in self.dirty_rects.drain(..) {
+            regions.push(DirtyRegion::Rect(rect));
+        }
+        // Add window manager's dirty regions directly
+        regions.extend(self.window_manager.take_dirty_regions());
+        regions
     }
     
-    /// Render only dirty regions (partial redraw)
-    pub fn render_dirty(&mut self, screen: &mut Screen, dirty: &[Rect]) {
-        // For each dirty rect, redraw just that area
-        for rect in dirty {
-            // Fill dirty area with background first
+    /// Render only dirty regions (smart partial redraw)
+    pub fn render_dirty_regions(&mut self, screen: &mut Screen, dirty: &[DirtyRegion]) {
+        // Collect all Rect regions that need background clearing
+        let mut rects_to_clear = Vec::new();
+        for region in dirty {
+            match region {
+                DirtyRegion::Rect(rect) => rects_to_clear.push(*rect),
+                DirtyRegion::RectFromWindow(rect, _) => rects_to_clear.push(*rect),
+                _ => {}
+            }
+        }
+        
+        // Fill areas with background first (only for Rect dirty regions)
+        for rect in &rects_to_clear {
             self.render_background_rect(screen, rect);
         }
         
-        // Redraw taskbar if any dirty rect intersects it
+        // Redraw taskbar if any Rect dirty region intersects it
         let taskbar_y = (self.height - TASKBAR_HEIGHT) as i32;
         let taskbar_rect = Rect::new(0, taskbar_y, self.width, TASKBAR_HEIGHT);
-        for rect in dirty {
+        for rect in &rects_to_clear {
             if rect.intersects(&taskbar_rect) {
                 self.render_taskbar(screen);
                 break;
             }
         }
         
-        // Render windows that intersect dirty areas
-        self.window_manager.render_dirty(screen, dirty);
+        // Render windows using the smart dirty region system
+        self.window_manager.render_dirty_regions(screen, dirty);
         
         // Render start menu on top
         self.start_menu.render(screen);

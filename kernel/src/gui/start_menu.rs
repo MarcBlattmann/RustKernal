@@ -43,6 +43,15 @@ impl StartMenu {
         use super::pa_parser::get_app_ids;
         
         let mut items = Vec::new();
+        
+        // Add built-in native apps first
+        items.push(MenuItem::new("Code Editor", "editor"));
+        items.push(MenuItem::new("File Explorer", "explorer"));
+        items.push(MenuItem::new("Terminal", "terminal"));
+        items.push(MenuItem::new("Documentation", "docs"));
+        items.push(MenuItem::new("---", "---")); // Separator
+        
+        // Add .pa apps from the apps folder
         for app_id in get_app_ids() {
             // Create a nice display name from the app_id
             let name = Self::format_app_name(app_id);
