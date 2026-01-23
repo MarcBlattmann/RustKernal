@@ -134,8 +134,9 @@ pub fn run_gui(screen: &mut Screen) {
                 // - FullWindow: Re-render entire window (for resize/move)
                 // - Rect: Arbitrary area (for closed windows, etc.)
                 desktop.render_dirty_regions(screen, &dirty_regions);
-            } else if needs_redraw || cursor_changed {
+            } else if needs_redraw {
                 // No dirty regions but something changed - full redraw
+                // Note: cursor_changed doesn't need redraw - cursor is drawn separately
                 desktop.render(screen);
             }
             cursor::show_at(screen, mx, my);
