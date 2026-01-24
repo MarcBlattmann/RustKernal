@@ -1,4 +1,4 @@
-# Rust kernal 
+# Rust kernal
 
 ___
 
