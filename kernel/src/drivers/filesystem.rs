@@ -536,6 +536,54 @@ impl SimpleFS {
         true
     }
 
+    /// Rename or move a file/directory
+    /// Can be used to rename within the same directory or move to a different directory
+    pub fn rename_file(&mut self, old_path: &str, new_path: &str) -> bool {
+        // Normalize paths
+        let old_normalized = old_path.trim_start_matches('/');
+        let new_normalized = new_path.trim_start_matches('/');
+        
+        // Check if source exists
+        let entry_idx = match self.find_entry(old_normalized) {
+            Some(idx) => idx,
+            None => return false,
+        };
+        
+        // Check if destination already exists
+        if self.find_entry(new_normalized).is_some() {
+            return false;
+        }
+        
+        // Update the entry name
+        self.entries[entry_idx].set_name(new_normalized);
+        
+        // Save to disk
+        let _ = self.save_to_disk();
+        
+        true
+    }
+
+    /// Move a file to a different directory
+    pub fn move_file(&mut self, source_path: &str, dest_dir: &str) -> bool {
+        // Extract filename from source path
+        let source_normalized = source_path.trim_start_matches('/');
+        let filename = if let Some(pos) = source_normalized.rfind('/') {
+            &source_normalized[pos + 1..]
+        } else {
+            source_normalized
+        };
+        
+        // Build destination path
+        let dest_normalized = dest_dir.trim_start_matches('/').trim_end_matches('/');
+        let new_path = if dest_normalized.is_empty() {
+            filename.to_string()
+        } else {
+            format!("{}/{}", dest_normalized, filename)
+        };
+        
+        self.rename_file(source_path, &new_path)
+    }
+
     /// List all files and directories at the root level
     /// For files like "docs/vbox.md", only returns "docs" as a directory
     pub fn list_files(&self) -> Vec<(String, bool)> {

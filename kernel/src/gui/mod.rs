@@ -134,8 +134,12 @@ pub fn run_gui(screen: &mut Screen) {
                 // - FullWindow: Re-render entire window (for resize/move)
                 // - Rect: Arbitrary area (for closed windows, etc.)
                 desktop.render_dirty_regions(screen, &dirty_regions);
+            } else if desktop.has_label_updates() {
+                // Only dynamic labels changed (e.g., button clicked that changed a variable)
+                // Do efficient flicker-free label-only update instead of full redraw
+                desktop.render_label_updates(screen);
             } else if needs_redraw {
-                // No dirty regions but something changed - full redraw
+                // No dirty regions and no label updates but something changed - full redraw
                 // Note: cursor_changed doesn't need redraw - cursor is drawn separately
                 desktop.render(screen);
             }

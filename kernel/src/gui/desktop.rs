@@ -256,6 +256,10 @@ impl Desktop {
                     // Run a .pa app file (from Ctrl+R in code editor)
                     self.run_pa_file(&filepath);
                 }
+                ScriptAction::RefreshStartMenu => {
+                    // Apps folder was modified - refresh the start menu
+                    self.start_menu.refresh();
+                }
                 ScriptAction::Close => {
                     // Window was closed - already handled
                 }

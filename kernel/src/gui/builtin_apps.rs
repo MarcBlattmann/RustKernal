@@ -611,9 +611,10 @@ pub enum ContextMenuOption {
 #[derive(Clone)]
 pub enum ExplorerAction {
     None,
-    OpenFile(String),      // Open file in code editor
-    NavigateToDir(String), // Navigate into directory
-    RunApp(String),        // Run a .pa app file
+    OpenFile(String),       // Open file in code editor
+    NavigateToDir(String),  // Navigate into directory
+    RunApp(String),         // Run a .pa app file
+    RefreshStartMenu,       // Request start menu refresh (when apps folder changes)
 }
 
 pub struct FileExplorer {
@@ -633,6 +634,9 @@ pub struct FileExplorer {
     /// Track last click for double-click detection
     last_click_index: Option<usize>,
     click_count: u8,
+    /// Clipboard for cut/paste operations
+    clipboard_path: Option<String>,
+    clipboard_is_cut: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -640,6 +644,7 @@ pub enum InputMode {
     NewFile,
     NewFolder,
     Rename,
+    Move,  // Enter destination path for move
 }
 
 impl FileExplorer {
@@ -658,6 +663,8 @@ impl FileExplorer {
             input_buffer: String::new(),
             last_click_index: None,
             click_count: 0,
+            clipboard_path: None,
+            clipboard_is_cut: false,
         };
         explorer.refresh();
         explorer
@@ -726,10 +733,10 @@ impl FileExplorer {
 
     pub fn move_selection(&mut self, delta: i32) {
         if self.context_menu_visible {
-            // Navigate context menu
+            // Navigate context menu (7 items: 0-6)
             if delta < 0 && self.context_menu_selected > 0 {
                 self.context_menu_selected -= 1;
-            } else if delta > 0 && self.context_menu_selected < 4 {
+            } else if delta > 0 && self.context_menu_selected < 6 {
                 self.context_menu_selected += 1;
             }
             return;
@@ -764,23 +771,38 @@ impl FileExplorer {
                 '\n' | '\r' => {
                     // Confirm input
                     if !self.input_buffer.is_empty() {
+                        let mut affects_apps = false;
                         match mode {
                             InputMode::NewFile => {
                                 self.create_file(&self.input_buffer.clone());
+                                // Check if we're in apps folder
+                                affects_apps = self.current_path == "/apps" || self.current_path == "apps";
                             }
                             InputMode::NewFolder => {
                                 self.create_directory(&self.input_buffer.clone());
                             }
                             InputMode::Rename => {
                                 self.rename_selected(&self.input_buffer.clone());
+                                // Check if we're in apps folder
+                                affects_apps = self.current_path == "/apps" || self.current_path == "apps";
+                            }
+                            InputMode::Move => {
+                                let (_, apps_affected) = self.move_selected_to(&self.input_buffer.clone());
+                                affects_apps = apps_affected;
                             }
                         }
+                        self.input_mode = None;
+                        self.input_buffer.clear();
+                        if affects_apps {
+                            return ExplorerAction::RefreshStartMenu;
+                        }
+                        return ExplorerAction::None;
                     }
                     self.input_mode = None;
                     self.input_buffer.clear();
                 }
-                c if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' => {
-                    if self.input_buffer.len() < 32 {
+                c if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' || c == '/' => {
+                    if self.input_buffer.len() < 64 {
                         self.input_buffer.push(c);
                     }
                 }
@@ -793,7 +815,7 @@ impl FileExplorer {
         if self.context_menu_visible {
             match key {
                 '\n' | '\r' => {
-                    self.execute_context_menu_action();
+                    return self.execute_context_menu_action();
                 }
                 _ => {
                     self.context_menu_visible = false;
@@ -824,15 +846,29 @@ impl FileExplorer {
             }
             'd' | 'D' => {
                 // Delete selected
+                let in_apps = self.current_path == "/apps" || self.current_path == "apps";
                 self.delete_selected();
+                if in_apps {
+                    return ExplorerAction::RefreshStartMenu;
+                }
             }
             'r' | 'R' => {
                 // Refresh
                 self.refresh();
             }
+            'x' | 'X' => {
+                // Cut (prepare to move)
+                self.cut_selected();
+            }
+            'v' | 'V' => {
+                // Paste (complete move)
+                if self.paste() {
+                    return ExplorerAction::RefreshStartMenu;
+                }
+            }
             'm' | 'M' => {
-                // Show context menu
-                self.show_context_menu(100, 100);
+                // Move to specific path (prompts for destination)
+                self.start_move_input();
             }
             _ => {}
         }
@@ -858,7 +894,7 @@ impl FileExplorer {
                     }
                 }
                 SpecialKey::Down => {
-                    if self.context_menu_selected < 4 {
+                    if self.context_menu_selected < 6 {
                         self.context_menu_selected += 1;
                     }
                 }
@@ -911,8 +947,9 @@ impl FileExplorer {
     }
     
     /// Execute selected context menu action
-    fn execute_context_menu_action(&mut self) {
+    fn execute_context_menu_action(&mut self) -> ExplorerAction {
         self.context_menu_visible = false;
+        let in_apps = self.current_path == "/apps" || self.current_path == "apps";
         match self.context_menu_selected {
             0 => { // New File
                 self.input_mode = Some(InputMode::NewFile);
@@ -922,20 +959,32 @@ impl FileExplorer {
                 self.input_mode = Some(InputMode::NewFolder);
                 self.input_buffer.clear();
             }
-            2 => { // Delete
-                self.delete_selected();
+            2 => { // Cut (for move)
+                self.cut_selected();
             }
-            3 => { // Rename
+            3 => { // Paste
+                if self.paste() {
+                    return ExplorerAction::RefreshStartMenu;
+                }
+            }
+            4 => { // Delete
+                self.delete_selected();
+                if in_apps {
+                    return ExplorerAction::RefreshStartMenu;
+                }
+            }
+            5 => { // Rename
                 if let Some(entry) = self.get_selected() {
                     self.input_buffer = entry.name.clone();
                     self.input_mode = Some(InputMode::Rename);
                 }
             }
-            4 => { // Refresh
+            6 => { // Refresh
                 self.refresh();
             }
             _ => {}
         }
+        ExplorerAction::None
     }
     
     /// Handle mouse click, returns (needs_redraw, action)
@@ -946,7 +995,7 @@ impl FileExplorer {
                 self.context_menu_x,
                 self.context_menu_y,
                 120,
-                100
+                140  // Increased height for more items
             );
             if !menu_rect.contains(x, y) {
                 self.context_menu_visible = false;
@@ -954,10 +1003,10 @@ impl FileExplorer {
             }
             // Check if clicking on menu item
             let rel_y = y - self.context_menu_y;
-            if rel_y >= 0 && rel_y < 100 {
+            if rel_y >= 0 && rel_y < 140 {
                 self.context_menu_selected = (rel_y / 20) as usize;
-                self.execute_context_menu_action();
-                return (true, ExplorerAction::None);
+                let action = self.execute_context_menu_action();
+                return (true, action);
             }
         }
         
@@ -1147,6 +1196,114 @@ impl FileExplorer {
         false
     }
 
+    /// Cut selected file (prepare for move)
+    pub fn cut_selected(&mut self) {
+        if let Some(entry) = self.get_selected() {
+            // Skip ".." entry
+            if entry.name == ".." {
+                return;
+            }
+            
+            // Store full path in clipboard
+            let full_path = if self.current_path == "/" {
+                format!("/{}", entry.name)
+            } else {
+                format!("{}/{}", self.current_path, entry.name)
+            };
+            
+            self.clipboard_path = Some(full_path);
+            self.clipboard_is_cut = true;
+        }
+    }
+    
+    /// Paste (move) file from clipboard to current directory
+    /// Returns true if apps folder was affected (need to refresh start menu)
+    pub fn paste(&mut self) -> bool {
+        if let Some(source_path) = self.clipboard_path.take() {
+            if self.clipboard_is_cut {
+                let mut fs = FILESYSTEM.lock();
+                // Move to current directory
+                let dest_dir = if self.current_path == "/" {
+                    String::new()
+                } else {
+                    self.current_path.trim_start_matches('/').to_string()
+                };
+                
+                // Check if source or dest is apps folder
+                let affects_apps = source_path.starts_with("/apps") || 
+                                   source_path.starts_with("apps") ||
+                                   dest_dir == "apps" || 
+                                   self.current_path == "/apps";
+                
+                if fs.move_file(&source_path, &dest_dir) {
+                    drop(fs);
+                    self.refresh();
+                    self.clipboard_is_cut = false;
+                    return affects_apps;
+                }
+            }
+            self.clipboard_is_cut = false;
+        }
+        false
+    }
+    
+    /// Start move input mode (prompts for destination path)
+    pub fn start_move_input(&mut self) {
+        if let Some(entry) = self.get_selected() {
+            // Skip ".." entry
+            if entry.name == ".." {
+                return;
+            }
+            
+            self.input_mode = Some(InputMode::Move);
+            // Pre-fill with current path
+            self.input_buffer = self.current_path.clone();
+        }
+    }
+    
+    /// Move selected file to specified path
+    /// Returns (success, affects_apps_folder)
+    pub fn move_selected_to(&mut self, dest_path: &str) -> (bool, bool) {
+        if let Some(entry) = self.get_selected() {
+            // Skip ".." entry
+            if entry.name == ".." {
+                return (false, false);
+            }
+            
+            // Build full source path
+            let source_path = if self.current_path == "/" {
+                format!("/{}", entry.name)
+            } else {
+                format!("{}/{}", self.current_path, entry.name)
+            };
+            
+            // Check if source or dest is apps folder
+            let affects_apps = source_path.starts_with("/apps") || 
+                               source_path.starts_with("apps") ||
+                               dest_path == "apps" || 
+                               dest_path.starts_with("apps/") ||
+                               self.current_path == "/apps";
+            
+            let mut fs = FILESYSTEM.lock();
+            if fs.move_file(&source_path, dest_path) {
+                drop(fs);
+                self.refresh();
+                return (true, affects_apps);
+            }
+        }
+        (false, false)
+    }
+    
+    /// Check if clipboard has content
+    pub fn has_clipboard(&self) -> bool {
+        self.clipboard_path.is_some()
+    }
+    
+    /// Get clipboard status for display
+    pub fn clipboard_status(&self) -> Option<&str> {
+        self.clipboard_path.as_deref()
+    }
+
     pub fn render(&self, screen: &mut Screen, bounds: &Rect) {
         let item_height = 20;
         let icon_width = 24;
@@ -1159,8 +1316,12 @@ impl FileExplorer {
         draw_filled_rect(screen, &header_rect, 0xFF313244);
         draw_text(screen, bounds.x as usize + 8, bounds.y as usize + 6, &self.current_path, COLOR_FOREGROUND);
         
-        // Shortcuts hint in header
-        let hint = "N:New F:Folder D:Del R:Refresh";
+        // Shortcuts hint in header - show clipboard status if active
+        let hint = if self.clipboard_path.is_some() {
+            "X:Cut V:Paste M:Move"
+        } else {
+            "N:New F:Fld D:Del X:Cut M:Move"
+        };
         let hint_x = bounds.x as usize + bounds.width - hint.len() * 8 - 8;
         draw_text(screen, hint_x, bounds.y as usize + 6, hint, 0xFF6C7086);
         
@@ -1198,7 +1359,12 @@ impl FileExplorer {
         let status_rect = Rect::new(bounds.x, status_y, bounds.width, 20);
         draw_filled_rect(screen, &status_rect, 0xFF313244);
         
-        let status = format!("{} items | Arrow keys to navigate", self.entries.len());
+        // Show clipboard status or normal status
+        let status = if let Some(clip_path) = &self.clipboard_path {
+            format!("Cut: {} | V to paste here", clip_path)
+        } else {
+            format!("{} items | Arrow keys to navigate", self.entries.len())
+        };
         draw_text(screen, bounds.x as usize + 8, (status_y + 4) as usize, &status, COLOR_FOREGROUND);
         
         // Input mode overlay
@@ -1207,6 +1373,7 @@ impl FileExplorer {
                 InputMode::NewFile => "New file name:",
                 InputMode::NewFolder => "New folder name:",
                 InputMode::Rename => "Rename to:",
+                InputMode::Move => "Move to (path):",
             };
             
             // Draw input box at bottom
@@ -1228,7 +1395,7 @@ impl FileExplorer {
     fn render_context_menu(&self, screen: &mut Screen) {
         let menu_width = 120;
         let item_height = 20;
-        let menu_items = ["New File", "New Folder", "Delete", "Rename", "Refresh"];
+        let menu_items = ["New File", "New Folder", "Cut", "Paste", "Delete", "Rename", "Refresh"];
         let menu_height = menu_items.len() * item_height;
         
         let menu_rect = Rect::new(self.context_menu_x, self.context_menu_y, menu_width, menu_height);

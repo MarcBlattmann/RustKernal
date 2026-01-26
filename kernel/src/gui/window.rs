@@ -972,6 +972,9 @@ impl WindowManager {
                                     self.pending_action = Some((i, ScriptAction::RunApp(filepath)));
                                     self.dirty_regions.push(DirtyRegion::FullWindow(i));
                                 }
+                                ScriptAction::RefreshStartMenu => {
+                                    self.pending_action = Some((i, ScriptAction::RefreshStartMenu));
+                                }
                                 ScriptAction::Minimize => {
                                     // Could implement minimize later
                                 }
@@ -1002,6 +1005,10 @@ impl WindowManager {
                                 ExplorerAction::NavigateToDir(_) => {
                                     // Navigation already handled inside explorer
                                     self.dirty_regions.push(DirtyRegion::ContentOnly(i));
+                                }
+                                ExplorerAction::RefreshStartMenu => {
+                                    // Apps folder was modified
+                                    self.pending_action = Some((i, ScriptAction::RefreshStartMenu));
                                 }
                                 ExplorerAction::None => {}
                             }
@@ -1047,6 +1054,10 @@ impl WindowManager {
                         }
                         ExplorerAction::NavigateToDir(_) => {
                             // Navigation handled inside explorer
+                        }
+                        ExplorerAction::RefreshStartMenu => {
+                            // Apps folder was modified
+                            self.pending_action = Some((topmost_idx, ScriptAction::RefreshStartMenu));
                         }
                         ExplorerAction::None => {}
                     }

@@ -183,8 +183,9 @@ pub enum ScriptAction {
     None,
     Close,
     Open(String),
-    RunApp(String),  // Run a .pa app file
+    RunApp(String),      // Run a .pa app file
     Minimize,
+    RefreshStartMenu,    // Signal that apps folder changed
 }
 
 /// Script engine state
