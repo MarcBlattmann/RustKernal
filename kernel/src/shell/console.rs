@@ -128,7 +128,7 @@ impl Console {
             let row_data = bitmap[row];
             for col in 0..FONT_WIDTH {
                 let pixel_on = (row_data >> (7 - col)) & 1 == 1;
-                let color = if pixel_on { self.text_color } else { 0x000000 };
+                let color = if pixel_on { self.text_color } else { 0xFF000000 };
                 let x = self.cursor_x + col;
                 let y = self.cursor_y + row;
                 if x < self.screen.width && y < self.screen.height {
@@ -138,6 +138,30 @@ impl Console {
         }
 
         self.cursor_x += FONT_WIDTH;
+    }
+
+    pub fn clear(&mut self) {
+        self.screen.framebuffer.fill(0);
+        self.cursor_x = 0;
+        self.cursor_y = 0;
+    }
+
+    pub fn backspace(&mut self) {
+        if self.cursor_x < FONT_WIDTH {
+            return;
+        }
+
+        self.cursor_x -= FONT_WIDTH;
+
+        for row in 0..FONT_HEIGHT {
+            for col in 0..FONT_WIDTH {
+                let x = self.cursor_x + col;
+                let y = self.cursor_y + row;
+                if x < self.screen.width && y < self.screen.height {
+                    self.screen.write_pixel(x, y, 0xFF000000);
+                }
+            }
+        }
     }
 
     fn scroll_up(&mut self) {
