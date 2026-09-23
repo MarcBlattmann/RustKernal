@@ -1,11 +1,15 @@
 [workspace]
 resolver = "3"
-members = ["kernel"]
+members = ["kernel", "fat32"]
 
 [package]
 name = "os-builder"
 version = "0.1.0"
 edition = "2024"
+
+[dependencies]
+# The runner pre-formats the data disk image with the same FAT32 code the kernel uses.
+fat32 = { path = "fat32" }
 
 [build-dependencies]
 kernel = { path = "kernel", artifact = "bin", target = "x86_64-unknown-none" }
@@ -16,4 +20,7 @@ bootloader = "0.11"
 opt-level = 3
 
 [profile.dev.build-override]
+opt-level = 3
+
+[profile.dev.package.fat32]
 opt-level = 3

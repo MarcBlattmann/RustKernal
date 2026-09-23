@@ -1,0 +1,14 @@
+[package]
+name = "fat32"
+version = "0.1.0"
+edition = "2024"
+description = "no_std FAT32 filesystem with MBR partitions and a block cache, used by the kernel and host tools"
+
+[lib]
+test = true
+
+[dependencies]
+
+[dev-dependencies]
+# Independent FAT implementation used as a test oracle on the host.
+fatfs = "0.3.6"
