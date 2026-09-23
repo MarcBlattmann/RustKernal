@@ -1,4 +1,5 @@
 use bootloader_api::info::{MemoryRegionKind, MemoryRegions};
+use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 use x86_64::registers::control::Cr3;
 use x86_64::structures::paging::{
@@ -18,6 +19,12 @@ struct Paging {
 }
 
 static PAGING: Mutex<Option<Paging>> = Mutex::new(None);
+static USABLE_MEMORY_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Total RAM the firmware reported as usable.
+pub fn usable_memory_bytes() -> u64 {
+    USABLE_MEMORY_BYTES.load(Ordering::Relaxed)
+}
 
 /// Hands out the usable frames listed in the bootloader memory map, one after another.
 struct BootInfoFrameAllocator {
@@ -49,6 +56,13 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
 /// Sets up access to the active page table. Requires the bootloader to map all physical memory
 /// at `physical_memory_offset`.
 pub unsafe fn init(physical_memory_offset: u64, memory_regions: &'static MemoryRegions) {
+    let usable_bytes = memory_regions
+        .iter()
+        .filter(|region| region.kind == MemoryRegionKind::Usable)
+        .map(|region| region.end - region.start)
+        .sum();
+    USABLE_MEMORY_BYTES.store(usable_bytes, Ordering::Relaxed);
+
     let (level_4_frame, _) = Cr3::read();
     let level_4_address = physical_memory_offset + level_4_frame.start_address().as_u64();
     let level_4_table = unsafe { &mut *(level_4_address as *mut PageTable) };

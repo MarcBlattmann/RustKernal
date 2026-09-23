@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use x86_64::instructions::port::Port;
 
 const CONFIG_ADDRESS_PORT: u16 = 0xCF8;
@@ -9,6 +10,7 @@ const COMMAND_MEMORY_SPACE_ENABLED: u32 = 0x02;
 
 const VENDOR_DEVICE_OFFSET: u8 = 0x00;
 const COMMAND_OFFSET: u8 = 0x04;
+const CLASS_OFFSET: u8 = 0x08;
 const HEADER_TYPE_OFFSET: u8 = 0x0C;
 const FIRST_BAR_OFFSET: u8 = 0x10;
 
@@ -17,6 +19,10 @@ pub struct PciDevice {
     pub bus: u8,
     pub slot: u8,
     pub function: u8,
+    pub vendor_id: u16,
+    pub device_id: u16,
+    pub class: u8,
+    pub subclass: u8,
 }
 
 fn config_address(bus: u8, slot: u8, function: u8, offset: u8) -> u32 {
@@ -41,8 +47,9 @@ fn write_config(bus: u8, slot: u8, function: u8, offset: u8, value: u32) {
     }
 }
 
-/// Scans every bus for a device with the given vendor and device id.
-pub fn find_device(vendor_id: u16, device_id: u16) -> Option<PciDevice> {
+/// Scans every bus and returns all present devices.
+pub fn devices() -> Vec<PciDevice> {
+    let mut devices = Vec::new();
     for bus in 0..=255u8 {
         for slot in 0..32u8 {
             if read_config(bus, slot, 0, VENDOR_DEVICE_OFFSET) as u16 == NO_DEVICE_VENDOR_ID {
@@ -54,13 +61,72 @@ pub fn find_device(vendor_id: u16, device_id: u16) -> Option<PciDevice> {
 
             for function in 0..function_count {
                 let ids = read_config(bus, slot, function, VENDOR_DEVICE_OFFSET);
-                if ids as u16 == vendor_id && (ids >> 16) as u16 == device_id {
-                    return Some(PciDevice { bus, slot, function });
+                if ids as u16 == NO_DEVICE_VENDOR_ID {
+                    continue;
                 }
+                let class = read_config(bus, slot, function, CLASS_OFFSET);
+                devices.push(PciDevice {
+                    bus,
+                    slot,
+                    function,
+                    vendor_id: ids as u16,
+                    device_id: (ids >> 16) as u16,
+                    class: (class >> 24) as u8,
+                    subclass: (class >> 16) as u8,
+                });
             }
         }
     }
-    None
+    devices
+}
+
+/// Finds the first device with the given vendor and device id.
+pub fn find_device(vendor_id: u16, device_id: u16) -> Option<PciDevice> {
+    devices().into_iter().find(|device| device.vendor_id == vendor_id && device.device_id == device_id)
+}
+
+pub fn vendor_name(vendor_id: u16) -> &'static str {
+    match vendor_id {
+        0x8086 => "Intel",
+        0x1022 => "AMD",
+        0x1002 => "AMD/ATI",
+        0x10DE => "NVIDIA",
+        0x10EC => "Realtek",
+        0x1234 => "QEMU/Bochs",
+        0x1AF4 => "Red Hat (virtio)",
+        0x1B36 => "Red Hat (QEMU)",
+        0x80EE => "VirtualBox",
+        0x15AD => "VMware",
+        0x1013 => "Cirrus Logic",
+        0x14E4 => "Broadcom",
+        _ => "unknown vendor",
+    }
+}
+
+impl PciDevice {
+    pub fn class_name(&self) -> &'static str {
+        match (self.class, self.subclass) {
+            (0x01, 0x01) => "IDE controller",
+            (0x01, 0x06) => "SATA controller",
+            (0x01, 0x08) => "NVMe controller",
+            (0x01, _) => "storage controller",
+            (0x02, _) => "network controller",
+            (0x03, _) => "display controller",
+            (0x04, 0x03) => "audio device",
+            (0x04, _) => "multimedia device",
+            (0x05, _) => "memory controller",
+            (0x06, 0x00) => "host bridge",
+            (0x06, 0x01) => "ISA bridge",
+            (0x06, 0x04) => "PCI bridge",
+            (0x06, _) => "bridge",
+            (0x07, _) => "communication controller",
+            (0x08, _) => "system peripheral",
+            (0x0C, 0x03) => "USB controller",
+            (0x0C, 0x05) => "SMBus controller",
+            (0x0C, _) => "serial bus controller",
+            _ => "other device",
+        }
+    }
 }
 
 impl PciDevice {

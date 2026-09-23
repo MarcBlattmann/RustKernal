@@ -256,15 +256,27 @@ pub trait Canvas {
     }
 
     fn draw_char(&mut self, x: i32, y: i32, character: char, color: u32, scale: i32) {
+        let cell = Rect::new(x, y, GLYPH_WIDTH as i32 * scale, GLYPH_HEIGHT as i32 * scale);
+        let Some(area) = cell.intersect(self.bounds()) else { return };
         let rows = glyph(character);
-        for (row, bits) in rows.iter().enumerate().take(GLYPH_HEIGHT) {
-            for column in 0..GLYPH_WIDTH {
-                if (bits >> (7 - column)) & 1 == 1 {
-                    let block = Rect::new(x + column as i32 * scale, y + row as i32 * scale, scale, scale);
-                    self.blend_rect(block, color);
+        let alpha = color >> 24;
+        let width = self.width();
+        let pixels = self.pixels_mut();
+
+        for py in area.y..area.bottom() {
+            let bits = rows[((py - y) / scale) as usize];
+            if bits == 0 {
+                continue;
+            }
+            let row = py as usize * width;
+            for px in area.x..area.right() {
+                if (bits >> (7 - (px - x) / scale)) & 1 == 1 {
+                    let pixel = &mut pixels[row + px as usize];
+                    *pixel = if alpha == 0xFF { color } else { blend(*pixel, color, alpha) };
                 }
             }
         }
+        self.mark_dirty(area);
     }
 
     /// Moves the whole image up by `distance` rows and fills the uncovered rows with `fill`.

@@ -14,3 +14,9 @@ pub fn init_heap() {
 
 #[global_allocator]
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
+
+/// Returns (bytes in use, total heap size).
+pub fn heap_usage() -> (usize, usize) {
+    let heap = ALLOCATOR.lock();
+    (heap.used(), heap.size())
+}

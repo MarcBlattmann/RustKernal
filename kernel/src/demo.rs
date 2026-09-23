@@ -110,7 +110,7 @@ pub fn run(display: &mut Display) {
     let mut clock = FrameClock::new(TARGET_FRAMES_PER_SECOND);
     let mut frame_number: u64 = 0;
 
-    while keyboard::try_read_char().is_none() {
+    while keyboard::read_key().is_none() {
         let elapsed = clock.wait_for_next_frame();
         frame_number += 1;
         frame_times[frame_number as usize % GRAPH_SAMPLES] = elapsed;

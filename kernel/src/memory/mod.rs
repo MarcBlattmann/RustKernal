@@ -1,3 +1,3 @@
 mod heap;
 pub mod paging;
-pub use heap::init_heap;
+pub use heap::{heap_usage, init_heap};
