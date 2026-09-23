@@ -60,6 +60,15 @@ impl LineEditor {
         self.render(terminal);
     }
 
+    /// Replaces the characters from `start` up to the cursor with `text` and puts the cursor
+    /// behind it (used by tab completion).
+    pub fn replace_before_cursor(&mut self, terminal: &mut Terminal, start: usize, text: &str) {
+        let start = start.min(self.cursor);
+        self.buffer.splice(start..self.cursor, text.chars());
+        self.cursor = start + text.chars().count();
+        self.render(terminal);
+    }
+
     pub fn backspace(&mut self, terminal: &mut Terminal) {
         if self.cursor > 0 {
             self.cursor -= 1;

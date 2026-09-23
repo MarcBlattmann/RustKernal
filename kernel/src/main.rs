@@ -8,6 +8,7 @@ mod drivers;
 mod shell;
 mod utils;
 mod demo;
+mod fs;
 
 extern crate alloc;
 
@@ -34,6 +35,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     unsafe { memory::paging::init(physical_memory_offset, &boot_info.memory_regions) };
 
     let display = drivers::display::init(boot_info.framebuffer.take());
+    fs::init();
     shell::run(display)
 }
 

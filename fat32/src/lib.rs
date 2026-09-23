@@ -5,6 +5,24 @@
 //!
 //! PUBLIC API CONTRACT: the kernel and the runner are written against the signatures in this file.
 //! Implementations may add items but must not change or remove the ones declared here.
+//!
+//! # Layout of the implementation
+//!
+//! * [`boot_sector`]: BPB / FSInfo parsing and validation, volume geometry.
+//! * [`fat`]: FAT access through a small write-back sector cache, cluster allocation, chains.
+//! * [`io`]: byte-granular I/O on the data area and along cluster chains.
+//! * [`name`]: name validation, 8.3 short names, case-insensitive comparison.
+//! * [`dir`]: directory entries, VFAT long file names, entry creation and deletion.
+//! * [`ops`]: the file and directory operations behind the public API.
+//! * [`format`], [`check`]: `mkfs` and a read-only `fsck`.
+//!
+//! # Crash safety
+//!
+//! Operations order their writes so that an interruption at any point leaves, at worst, lost
+//! clusters (allocated in the FAT but unreachable) rather than corrupt or cross-linked files:
+//! clusters are linked in the FAT and data is written before a directory entry points at them,
+//! and directory entries are removed before their clusters are freed. The FAT[1] clean-shutdown
+//! bit is cleared while the volume has unsynced modifications.
 
 #![cfg_attr(not(test), no_std)]
 
@@ -15,6 +33,17 @@ use alloc::vec::Vec;
 
 pub mod cache;
 pub mod mbr;
+
+mod boot_sector;
+mod check;
+mod dir;
+mod fat;
+mod format;
+mod io;
+mod name;
+mod ops;
+mod path;
+mod time;
 
 pub use cache::CachedDevice;
 pub use mbr::{Partition, PartitionDevice};
@@ -61,6 +90,18 @@ pub enum DeviceError {
     NotReady,
 }
 
+impl core::fmt::Display for DeviceError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            DeviceError::OutOfRange => "sector out of range",
+            DeviceError::Io => "i/o error",
+            DeviceError::Timeout => "device timed out",
+            DeviceError::ReadOnly => "read-only device",
+            DeviceError::NotReady => "device not ready",
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     Device(DeviceError),
@@ -94,7 +135,24 @@ impl From<DeviceError> for Error {
 
 impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        todo!("human readable message, e.g. 'no such file or directory'")
+        match self {
+            Error::Device(DeviceError::Io) => f.write_str("i/o error"),
+            Error::Device(DeviceError::ReadOnly) => f.write_str("read-only file system"),
+            Error::Device(error) => write!(f, "i/o error: {}", error),
+            Error::NotFound => f.write_str("no such file or directory"),
+            Error::AlreadyExists => f.write_str("file exists"),
+            Error::NotADirectory => f.write_str("not a directory"),
+            Error::IsADirectory => f.write_str("is a directory"),
+            Error::DirectoryNotEmpty => f.write_str("directory not empty"),
+            Error::InvalidName => f.write_str("invalid file name"),
+            Error::InvalidPath => f.write_str("invalid path"),
+            Error::InvalidMove => f.write_str("cannot move a directory into itself"),
+            Error::NoSpace => f.write_str("no space left on device"),
+            Error::FileTooLarge => f.write_str("file too large"),
+            Error::Corrupt(what) => write!(f, "file system corrupt: {}", what),
+            Error::Unsupported(what) => write!(f, "unsupported: {}", what),
+            Error::RootDirectory => f.write_str("operation not permitted on the root directory"),
+        }
     }
 }
 
@@ -153,8 +211,19 @@ impl Default for FormatOptions {
 /// Writes an empty FAT32 volume covering the whole `device`. FAT32 needs at least 65525
 /// clusters; returns `Error::Unsupported` for devices that are too small.
 pub fn format<D: BlockDevice>(device: &mut D, options: &FormatOptions) -> Result<()> {
-    todo!()
+    format::format(device, options)
 }
+
+/// Remembers where the last walk along a cluster chain ended so sequential access does not
+/// re-walk the chain from its first cluster every time.
+#[derive(Debug, Clone, Copy)]
+struct ChainHint {
+    first: u32,
+    index: u32,
+    cluster: u32,
+}
+
+const CHAIN_HINTS: usize = 4;
 
 /// A mounted FAT32 volume.
 ///
@@ -164,126 +233,170 @@ pub fn format<D: BlockDevice>(device: &mut D, options: &FormatOptions) -> Result
 /// flushes the device.
 pub struct FileSystem<D: BlockDevice> {
     device: D,
-    // implementation state
+    geo: boot_sector::Geometry,
+    fat: fat::FatCache,
+    /// Free cluster count (always known after mount; recomputed when FSInfo is unreliable).
+    free_count: u32,
+    /// Where the next free-cluster search starts.
+    next_free: u32,
+    /// In-memory copy of the FSInfo sector (`None` when the volume has none).
+    fsinfo: Option<[u8; SECTOR_SIZE]>,
+    /// `(free_count, next_free)` as last written to the FSInfo sector.
+    fsinfo_on_disk: (u32, u32),
+    /// Whether the clean-shutdown bit is currently cleared on disk.
+    volume_dirty: bool,
+    /// Whether the clean-shutdown bit was set when the volume was mounted.
+    was_clean: bool,
+    /// The device rejected writes at mount time; every mutating call fails.
+    read_only: bool,
+    now: fn() -> Timestamp,
+    chain_hints: [Option<ChainHint>; CHAIN_HINTS],
+    next_hint: usize,
+    label: String,
 }
 
 impl<D: BlockDevice> FileSystem<D> {
     /// Validates the boot sector and FSInfo and mounts the volume. Marks the volume dirty (FAT[1]
     /// clean-shutdown bit) until `sync`/`unmount`.
     pub fn mount(device: D) -> Result<Self> {
-        todo!()
+        ops::mount(device)
     }
 
     /// Flushes everything, marks the volume clean and returns the device.
-    pub fn unmount(self) -> Result<D> {
-        todo!()
+    pub fn unmount(mut self) -> Result<D> {
+        self.sync()?;
+        Ok(self.device)
     }
 
     /// Writes all pending state, marks the volume clean and flushes the device.
     pub fn sync(&mut self) -> Result<()> {
-        todo!()
+        self.sync_all()
     }
 
     /// Sets the clock used for created/modified timestamps.
     pub fn set_time_source(&mut self, now: fn() -> Timestamp) {
-        todo!()
+        self.now = now;
     }
 
     pub fn stats(&mut self) -> Result<FsStats> {
-        todo!()
+        let cluster_size = self.geo.cluster_size;
+        Ok(FsStats {
+            label: self.label.clone(),
+            volume_id: self.geo.volume_id,
+            cluster_size,
+            total_clusters: self.geo.cluster_count,
+            free_clusters: self.free_count,
+            total_bytes: self.geo.cluster_count as u64 * cluster_size as u64,
+            free_bytes: self.free_count as u64 * cluster_size as u64,
+        })
     }
 
     pub fn metadata(&mut self, path: &str) -> Result<Metadata> {
-        todo!()
+        self.op_metadata(path)
     }
 
     pub fn exists(&mut self, path: &str) -> Result<bool> {
-        todo!()
+        match self.resolve_path(path) {
+            Ok(_) => Ok(true),
+            Err(Error::NotFound) | Err(Error::NotADirectory) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     /// Entries of a directory, without `.` and `..`, in on-disk order.
     pub fn read_dir(&mut self, path: &str) -> Result<Vec<Metadata>> {
-        todo!()
+        self.op_read_dir(path)
     }
 
     /// Creates one directory; the parent must exist.
     pub fn create_dir(&mut self, path: &str) -> Result<()> {
-        todo!()
+        self.mutate(|fs| fs.op_create_dir(path))
     }
 
     /// Creates a directory and any missing parents; succeeds if it already exists.
     pub fn create_dir_all(&mut self, path: &str) -> Result<()> {
-        todo!()
+        self.mutate(|fs| fs.op_create_dir_all(path))
     }
 
     /// Removes an empty directory.
     pub fn remove_dir(&mut self, path: &str) -> Result<()> {
-        todo!()
+        self.mutate(|fs| fs.op_remove_dir(path))
     }
 
     /// Removes a directory and everything below it.
     pub fn remove_dir_all(&mut self, path: &str) -> Result<()> {
-        todo!()
+        self.mutate(|fs| fs.op_remove_dir_all(path))
     }
 
     /// Creates an empty file if missing; otherwise updates its modified time (like `touch`).
     pub fn touch(&mut self, path: &str) -> Result<()> {
-        todo!()
+        self.mutate(|fs| fs.op_touch(path))
     }
 
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>> {
-        todo!()
+        self.op_read_file(path)
     }
 
     /// Reads up to `buffer.len()` bytes at `offset`; returns bytes read (0 at end of file).
     pub fn read_at(&mut self, path: &str, offset: u64, buffer: &mut [u8]) -> Result<usize> {
-        todo!()
+        self.op_read_at(path, offset, buffer)
     }
 
     /// Creates or replaces a file with `data`.
     pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<()> {
-        todo!()
+        self.mutate(|fs| fs.op_write_file(path, data))
     }
 
     /// Appends to a file, creating it if missing.
     pub fn append_file(&mut self, path: &str, data: &[u8]) -> Result<()> {
-        todo!()
+        self.mutate(|fs| fs.op_append_file(path, data))
     }
 
     /// Writes `data` at `offset`, growing the file (zero-filled) if needed. File must exist.
     pub fn write_at(&mut self, path: &str, offset: u64, data: &[u8]) -> Result<()> {
-        todo!()
+        self.mutate(|fs| fs.op_write_at(path, offset, data))
     }
 
     /// Shrinks or zero-extends a file to `length` bytes.
     pub fn truncate(&mut self, path: &str, length: u64) -> Result<()> {
-        todo!()
+        self.mutate(|fs| fs.op_truncate(path, length))
     }
 
     pub fn remove_file(&mut self, path: &str) -> Result<()> {
-        todo!()
+        self.mutate(|fs| fs.op_remove_file(path))
     }
 
     /// Renames or moves a file or directory. Fails with `AlreadyExists` if `to` exists, with
     /// `InvalidMove` when moving a directory into itself.
     pub fn rename(&mut self, from: &str, to: &str) -> Result<()> {
-        todo!()
+        self.mutate(|fs| fs.op_rename(from, to))
     }
 
     /// Copies a file's contents to a new file (fails if `to` exists).
     pub fn copy_file(&mut self, from: &str, to: &str) -> Result<()> {
-        todo!()
+        self.mutate(|fs| fs.op_copy_file(from, to))
     }
 
     /// Read-only consistency check (like `fsck -n`): walks every directory and cluster chain and
     /// reports cross-linked, lost or out-of-range clusters, bad chain lengths, invalid directory
     /// entries, broken `.`/`..` entries, orphaned long-name entries and a wrong FSInfo free count.
     pub fn check(&mut self) -> Result<CheckReport> {
-        todo!()
+        check::check(self)
     }
 
     pub fn device(&self) -> &D {
         &self.device
+    }
+
+    /// Whether the device refused writes at mount time (every mutating call then fails with
+    /// `Error::Device(DeviceError::ReadOnly)`).
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    /// Whether the clean-shutdown bit was set when the volume was mounted.
+    pub fn was_cleanly_unmounted(&self) -> bool {
+        self.was_clean
     }
 }
 
@@ -298,4 +411,11 @@ pub struct CheckReport {
     pub lost_clusters: u32,
     /// Whether the clean-shutdown bit was set when mounted.
     pub was_cleanly_unmounted: bool,
+}
+
+impl CheckReport {
+    /// True when no problems were found.
+    pub fn is_clean(&self) -> bool {
+        self.problems.is_empty()
+    }
 }

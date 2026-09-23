@@ -7,6 +7,7 @@ pub mod pci;
 pub mod serial;
 pub mod rtc;
 pub mod power;
+pub mod ata;
 
 pub fn init() {
     serial::init();
