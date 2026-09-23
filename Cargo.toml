@@ -10,3 +10,10 @@ edition = "2024"
 [build-dependencies]
 kernel = { path = "kernel", artifact = "bin", target = "x86_64-unknown-none" }
 bootloader = "0.11"
+
+# The kernel draws every pixel on the CPU; unoptimized builds are far too slow for 60 fps.
+[profile.dev.package.kernel]
+opt-level = 3
+
+[profile.dev.build-override]
+opt-level = 3
