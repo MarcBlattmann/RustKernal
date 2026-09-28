@@ -76,8 +76,10 @@ pub(crate) fn mount<D: BlockDevice>(mut device: D) -> Result<FileSystem<D>> {
     match fs.mark_dirty() {
         Ok(()) => {
             if !fs.was_clean {
-                // An interrupted FAT update may have reached only the first copy.
+                // An interrupted FAT update may have reached only the first copy, and an
+                // interrupted rename may have left two entries sharing one cluster chain.
                 fs.mirror_fat_copies()?;
+                fs.repair_rename_leftovers()?;
             }
             fs.write_fsinfo()?
         }
@@ -157,7 +159,9 @@ impl<D: BlockDevice> FileSystem<D> {
         self.flush_fat()?;
         self.write_fsinfo()?;
         self.device.flush()?;
-        if self.volume_dirty {
+        // A poisoned volume may hold two entries sharing a chain: it stays marked dirty, so the
+        // next mount repairs it.
+        if self.volume_dirty && !self.poisoned {
             let status = self.fat_raw(1)?;
             self.fat_set_raw(1, status | CLEAN_SHUTDOWN)?;
             self.flush_fat()?;
@@ -729,36 +733,155 @@ impl<D: BlockDevice> FileSystem<D> {
                 return Err(failure.error);
             }
         };
-        // Both names exist now; the barrier keeps the old one until the new one is on disk.
+        // Both names exist now; the barrier keeps the old one until the new one is on disk (and
+        // a moved directory's `..` is updated before its old entry goes away).
         let finished = (|| {
             self.barrier()?;
             if let Some(cluster) = moved_dir {
                 self.set_dotdot(cluster, target_dir)?;
+                self.barrier()?;
             }
             self.delete_entry(&source)
         })();
         if let Err(error) = finished {
-            // Two entries sharing one cluster chain must not survive: removing either of them
-            // would free data the other one still points to.
-            self.undo_rename(&created, moved_dir.map(|cluster| (cluster, source.dir_cluster)));
+            match self.entry_is_live(&source) {
+                // Two entries sharing one cluster chain must not survive: removing either of them
+                // would free data the other one still points to.
+                Ok(true) => self.undo_rename(&created, moved_dir.map(|cluster| (cluster, source.dir_cluster))),
+                // `delete_entry` wrote the old short entry's sector before it failed: only the new
+                // name is left, so the rename took effect and must not be undone (that would
+                // remove the last name of the data). Finish removing the old long-name entries.
+                Ok(false) => {
+                    if self.delete_long_entries(&source).and_then(|()| self.barrier()).is_ok() {
+                        return Ok(());
+                    }
+                }
+                // Unknown whether the old name is still there: keep the new one (never risk losing
+                // both) and refuse changes until a mount repairs a possible duplicate.
+                Err(_) => self.poisoned = true,
+            }
             return Err(error);
         }
         Ok(())
     }
 
-    /// Rolls back a rename that failed after its new entry was (possibly) written: removes the new
-    /// entry again (without freeing anything) and points a moved directory's `..` back at its old
-    /// parent. If that fails too, the volume refuses further changes until it is mounted again.
+    /// Rolls back a rename that failed after its new entry was (possibly) written: points a moved
+    /// directory's `..` back at its old parent and removes the new entry again (without freeing
+    /// anything). If the new entry may still be there afterwards, the volume refuses further
+    /// changes until it is mounted again (and the mount removes the duplicate).
     fn undo_rename(&mut self, created: &DirEntry, dotdot: Option<(u32, u32)>) {
         let undone = (|| {
             if let Some((cluster, old_parent)) = dotdot {
                 self.set_dotdot(cluster, old_parent)?;
+                self.barrier()?;
             }
-            self.delete_entry(created)?;
+            if self.entry_is_live(created)? {
+                self.delete_entry(created)?;
+            } else {
+                // Only the long-name entries were written (in other sectors than the short one).
+                self.delete_long_entries(created)?;
+            }
             self.barrier()
         })();
-        if undone.is_err() {
+        if undone.is_err() && self.entry_is_live(created).unwrap_or(true) {
             self.poisoned = true;
         }
     }
+
+    // ----- repair after an unclean shutdown --------------------------------------------------
+
+    /// Calls `visit` for every visible entry of the directory tree. Directories that cannot be
+    /// read as a directory (reported by `check`) are skipped; each directory is visited once.
+    fn for_each_entry(&mut self, mut visit: impl FnMut(&DirEntry)) -> Result<()> {
+        let root = self.geo.root_cluster;
+        let mut stack = vec![root];
+        let mut seen = BTreeSet::new();
+        seen.insert(root);
+        while let Some(dir) = stack.pop() {
+            let entries = match self.list_dir(dir) {
+                Ok(entries) => entries,
+                Err(Error::Corrupt(_)) => continue,
+                Err(error) => return Err(error),
+            };
+            for entry in entries {
+                visit(&entry);
+                let cluster = entry.first_cluster();
+                if entry.is_dir() && self.geo.is_valid_cluster(cluster) && seen.insert(cluster) {
+                    stack.push(cluster);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Where the `..` entry of directory `dir` points (the root as its cluster number).
+    fn dotdot_target(&mut self, dir: u32) -> Result<Option<u32>> {
+        let mut iter = crate::dir::EntryIter::new(dir);
+        for _ in 0..2 {
+            match iter.next(self)? {
+                Some(entry) if entry.raw[..11] == DOTDOT_NAME => {
+                    let target = entry.first_cluster();
+                    return Ok(Some(if target == 0 { self.geo.root_cluster } else { target }));
+                }
+                Some(_) => {}
+                None => break,
+            }
+        }
+        Ok(None)
+    }
+
+    /// Removes the duplicate entries a rename leaves behind when it is cut off between creating
+    /// the new entry and removing the old one (a crash, or a failed rollback that poisoned the
+    /// volume): two entries pointing at the same cluster chain, identical apart from the name.
+    /// Left alone, removing either name would free the data the other one still references. One
+    /// entry is kept (for a directory the one its `..` points into); the others are removed
+    /// without freeing any clusters. Run on mounts after an unclean shutdown.
+    fn repair_rename_leftovers(&mut self) -> Result<()> {
+        let mut firsts = BTreeSet::new();
+        let mut shared = BTreeSet::new();
+        let geo = self.geo.clone();
+        self.for_each_entry(|entry| {
+            let cluster = entry.first_cluster();
+            if geo.is_valid_cluster(cluster) && !firsts.insert(cluster) {
+                shared.insert(cluster);
+            }
+        })?;
+        if shared.is_empty() {
+            return Ok(());
+        }
+        drop(firsts);
+        let mut groups: Vec<(u32, Vec<DirEntry>)> = shared.iter().map(|&cluster| (cluster, Vec::new())).collect();
+        self.for_each_entry(|entry| {
+            let cluster = entry.first_cluster();
+            if let Ok(i) = groups.binary_search_by_key(&cluster, |group| group.0) {
+                groups[i].1.push(entry.clone());
+            }
+        })?;
+        for (cluster, group) in groups {
+            let mut keep = 0;
+            let mut dotdot = None;
+            if group[0].is_dir() {
+                dotdot = self.dotdot_target(cluster)?;
+                keep = group.iter().position(|entry| Some(entry.dir_cluster) == dotdot).unwrap_or(0);
+            }
+            let kept = group[keep].clone();
+            let mut removed = false;
+            for (i, entry) in group.iter().enumerate() {
+                if i != keep && is_rename_copy(&kept, entry) {
+                    self.delete_entry(entry)?;
+                    removed = true;
+                }
+            }
+            if removed && kept.is_dir() && dotdot != Some(kept.dir_cluster) {
+                self.set_dotdot(cluster, kept.dir_cluster)?;
+            }
+        }
+        self.barrier()
+    }
+}
+
+/// Whether two entries are a rename's old and new entry: everything but the name (and the
+/// archive bit and case flags, which a rename may set) is identical.
+fn is_rename_copy(a: &DirEntry, b: &DirEntry) -> bool {
+    a.is_dir() == b.is_dir() && (a.attr() | ATTR_ARCHIVE) == (b.attr() | ATTR_ARCHIVE) && a.raw[13..] == b.raw[13..]
 }

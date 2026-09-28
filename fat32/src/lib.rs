@@ -24,9 +24,11 @@
 //! and directory entries are removed before their clusters are freed. The FAT[1] clean-shutdown
 //! bit is cleared while the volume has unsynced modifications. The one exception is `rename`,
 //! which creates the new entry before it removes the old one: an interruption between the two
-//! leaves both names pointing at the same data rather than losing the file (a failed rename
-//! removes the new entry again; if even that fails, the volume refuses further changes until it
-//! is mounted again).
+//! leaves both names pointing at the same data rather than losing the file. A failed rename
+//! removes the new entry again (unless the old one is already gone: then the rename took effect);
+//! if even that fails, the volume refuses further changes and stays marked dirty. Mounting a
+//! volume that was not cleanly unmounted removes such duplicates (keeping one name, freeing
+//! nothing), so removing a file or directory never frees clusters another entry still uses.
 //!
 //! The order is enforced with write barriers ([`BlockDevice::flush`]) at every point where it
 //! matters, so it also holds on top of a write-back cache such as [`CachedDevice`], which may
@@ -268,8 +270,9 @@ pub struct FileSystem<D: BlockDevice> {
     was_clean: bool,
     /// The device rejected writes at mount time; every mutating call fails.
     read_only: bool,
-    /// A failed rename could not be undone (see the crate docs); every mutating call fails until
-    /// the volume is mounted again, so nothing frees clusters that two entries share.
+    /// A failed rename could not be undone (see the crate docs); every mutating call fails and the
+    /// volume is not marked clean, so nothing frees clusters that two entries share before the
+    /// next mount removes the duplicate.
     poisoned: bool,
     now: fn() -> Timestamp,
     chain_hints: [Option<ChainHint>; CHAIN_HINTS],
@@ -279,7 +282,9 @@ pub struct FileSystem<D: BlockDevice> {
 
 impl<D: BlockDevice> FileSystem<D> {
     /// Validates the boot sector and FSInfo and mounts the volume. Marks the volume dirty (FAT[1]
-    /// clean-shutdown bit) until `sync`/`unmount`.
+    /// clean-shutdown bit) until `sync`/`unmount`. After an unclean shutdown it also re-mirrors
+    /// the FAT copies and removes the duplicate entry an interrupted rename may have left (this
+    /// walks the whole directory tree).
     pub fn mount(device: D) -> Result<Self> {
         ops::mount(device)
     }
@@ -389,7 +394,9 @@ impl<D: BlockDevice> FileSystem<D> {
     }
 
     /// Renames or moves a file or directory. Fails with `AlreadyExists` if `to` exists, with
-    /// `InvalidMove` when moving a directory into itself.
+    /// `InvalidMove` when moving a directory into itself. After any other error the old name
+    /// remains, except when the old entry was already removed when the error occurred: then only
+    /// the new name remains (at worst with orphaned long-name entries left behind).
     pub fn rename(&mut self, from: &str, to: &str) -> Result<()> {
         self.mutate(|fs| fs.op_rename(from, to))
     }

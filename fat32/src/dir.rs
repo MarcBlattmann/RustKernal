@@ -635,6 +635,23 @@ impl<D: BlockDevice> FileSystem<D> {
         self.edit_slots(&order, |_, raw| raw[0] = DELETED)
     }
 
+    /// Marks only an entry's long-name entries deleted (what [`Self::delete_entry`] leaves
+    /// behind when it fails after the short entry's sector was written).
+    pub(crate) fn delete_long_entries(&mut self, entry: &DirEntry) -> Result<()> {
+        self.edit_slots(&entry.slots[..entry.slots.len() - 1], |_, raw| raw[0] = DELETED)
+    }
+
+    /// Whether an entry's short entry is (still) on disk as it was read or written: tells a
+    /// failed [`Self::delete_entry`] or [`Self::create_entry`] apart from one that got as far as
+    /// the short entry's sector.
+    pub(crate) fn entry_is_live(&mut self, entry: &DirEntry) -> Result<bool> {
+        let loc = entry.sfn_slot();
+        let mut sector = [0u8; SECTOR_SIZE];
+        self.device.read_sectors(self.slot_lba(loc), &mut sector)?;
+        let offset = loc.offset as usize % SECTOR_SIZE;
+        Ok(sector[offset..offset + 11] == entry.raw[..11])
+    }
+
     /// Rewrites an entry's short entry (size, first cluster, timestamps, attributes).
     pub(crate) fn update_entry(&mut self, entry: &DirEntry) -> Result<()> {
         self.write_slots(&[(entry.sfn_slot(), entry.raw)])

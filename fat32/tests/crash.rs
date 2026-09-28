@@ -1,7 +1,8 @@
 //! Power-loss simulation: every mutating operation is cut off after each possible number of
 //! device writes, and the disk as it was at that moment must mount, pass `check()` apart from
-//! harmless leftovers (lost clusters, over-long chains, a briefly duplicated entry during a
-//! rename) and keep every file the operation did not touch intact.
+//! harmless leftovers (lost clusters, over-long chains, orphaned long-name entries) and keep every
+//! file the operation did not touch intact. A rename cut off while both names exist is repaired by
+//! that mount, so no cross-linked or duplicated entry is ever accepted.
 
 mod common;
 
@@ -43,7 +44,7 @@ impl BlockDevice for CrashDisk {
 type Op = fn(&mut FileSystem<CrashDisk>) -> fat32::Result<()>;
 
 /// Problems a crash may legitimately leave behind.
-fn acceptable(problem: &str, allow_duplicates: bool) -> bool {
+fn acceptable(problem: &str) -> bool {
     // Lost clusters and long-name entries whose short entry never reached the disk take space
     // but reference nothing.
     if problem.contains("lost clusters") || problem.contains("orphaned long-name entries") {
@@ -55,10 +56,7 @@ fn acceptable(problem: &str, allow_duplicates: bool) -> bool {
         let needs: u64 = problem.rsplit(' ').next().unwrap().parse().unwrap();
         return have > needs;
     }
-    // A rename that was cut short can leave both names (and a '..' still pointing at the old
-    // parent) behind; nothing is lost.
-    allow_duplicates
-        && (problem.contains("cross-linked") || problem.contains("duplicate name") || problem.contains("'..'"))
+    false
 }
 
 fn base_image() -> RamDisk {
@@ -76,7 +74,7 @@ fn base_image() -> RamDisk {
     fs.unmount().unwrap()
 }
 
-fn run_scenario(name: &str, op: Op, touched: &[&str], allow_duplicates: bool) {
+fn run_scenario(name: &str, op: Op, touched: &[&str]) {
     let base = base_image();
     let mut reference = FileSystem::mount(base.clone()).unwrap();
     let before = dump_ours(&mut reference);
@@ -100,7 +98,7 @@ fn run_scenario(name: &str, op: Op, touched: &[&str], allow_duplicates: bool) {
         let report = after.check().unwrap();
         for problem in &report.problems {
             assert!(
-                acceptable(problem, allow_duplicates),
+                acceptable(problem),
                 "{}: after {} writes: {}\n{:#?}",
                 name,
                 budget,
@@ -126,43 +124,41 @@ fn run_scenario(name: &str, op: Op, touched: &[&str], allow_duplicates: bool) {
 
 #[test]
 fn crash_during_create() {
-    run_scenario("create", |fs| fs.write_file("/new file with a long name.bin", &pattern(20_000, 1)), &["/new"], false);
+    run_scenario("create", |fs| fs.write_file("/new file with a long name.bin", &pattern(20_000, 1)), &["/new"]);
     run_scenario(
         "create in full dir",
         |fs| fs.write_file("/docs/another long document name.txt", b"x"),
         &["/docs/another"],
-        false,
     );
 }
 
 #[test]
 fn crash_during_replace_and_append() {
-    run_scenario("replace grow", |fs| fs.write_file("/victim.bin", &pattern(30_000, 2)), &["/victim.bin"], false);
-    run_scenario("replace shrink", |fs| fs.write_file("/victim.bin", b"small"), &["/victim.bin"], false);
-    run_scenario("append", |fs| fs.append_file("/victim.bin", &pattern(10_000, 3)), &["/victim.bin"], false);
-    run_scenario("write_at sparse", |fs| fs.write_at("/victim.bin", 50_000, b"far"), &["/victim.bin"], false);
+    run_scenario("replace grow", |fs| fs.write_file("/victim.bin", &pattern(30_000, 2)), &["/victim.bin"]);
+    run_scenario("replace shrink", |fs| fs.write_file("/victim.bin", b"small"), &["/victim.bin"]);
+    run_scenario("append", |fs| fs.append_file("/victim.bin", &pattern(10_000, 3)), &["/victim.bin"]);
+    run_scenario("write_at sparse", |fs| fs.write_at("/victim.bin", 50_000, b"far"), &["/victim.bin"]);
 }
 
 #[test]
 fn crash_during_truncate_and_remove() {
-    run_scenario("truncate shrink", |fs| fs.truncate("/victim.bin", 100), &["/victim.bin"], false);
-    run_scenario("truncate grow", |fs| fs.truncate("/victim.bin", 30_000), &["/victim.bin"], false);
-    run_scenario("remove file", |fs| fs.remove_file("/victim.bin"), &["/victim.bin"], false);
-    run_scenario("remove tree", |fs| fs.remove_dir_all("/docs"), &["/docs"], false);
+    run_scenario("truncate shrink", |fs| fs.truncate("/victim.bin", 100), &["/victim.bin"]);
+    run_scenario("truncate grow", |fs| fs.truncate("/victim.bin", 30_000), &["/victim.bin"]);
+    run_scenario("remove file", |fs| fs.remove_file("/victim.bin"), &["/victim.bin"]);
+    run_scenario("remove tree", |fs| fs.remove_dir_all("/docs"), &["/docs"]);
 }
 
 #[test]
 fn crash_during_directory_operations() {
-    run_scenario("mkdir", |fs| fs.create_dir("/brand new directory"), &["/brand"], false);
-    run_scenario("mkdir -p", |fs| fs.create_dir_all("/a/b/c/d"), &["/a"], false);
-    run_scenario("copy", |fs| fs.copy_file("/docs/deep/deeper/big.bin", "/other/copy.bin"), &["/other"], false);
+    run_scenario("mkdir", |fs| fs.create_dir("/brand new directory"), &["/brand"]);
+    run_scenario("mkdir -p", |fs| fs.create_dir_all("/a/b/c/d"), &["/a"]);
+    run_scenario("copy", |fs| fs.copy_file("/docs/deep/deeper/big.bin", "/other/copy.bin"), &["/other"]);
     run_scenario(
         "rename file",
         |fs| fs.rename("/victim.bin", "/other/moved victim.bin"),
         &["/victim.bin", "/other"],
-        true,
     );
-    run_scenario("rename dir", |fs| fs.rename("/docs/deep", "/other/deep moved"), &["/docs/deep", "/other"], true);
+    run_scenario("rename dir", |fs| fs.rename("/docs/deep", "/other/deep moved"), &["/docs/deep", "/other"]);
 }
 
 // ----- the kernel's stack: a write-back cache in front of the disk ----------------------------------
@@ -180,7 +176,6 @@ fn run_cached_scenario(
     name: &str,
     op: CachedOp,
     touched: &[&str],
-    allow_duplicates: bool,
     verify: fn(&mut FileSystem<RamDisk>, &str, u64),
 ) {
     let base = base_image();
@@ -206,7 +201,7 @@ fn run_cached_scenario(
         let report = after.check().unwrap();
         for problem in &report.problems {
             assert!(
-                acceptable(problem, allow_duplicates),
+                acceptable(problem),
                 "{} (cached): after {} writes: {}\n{:#?}",
                 name,
                 budget,
@@ -255,20 +250,19 @@ fn verify_new(fs: &mut FileSystem<RamDisk>, name: &str, budget: u64) {
 
 #[test]
 fn crash_with_write_back_cache() {
-    run_cached_scenario("create", |fs| fs.write_file("/new file with a long name.bin", &pattern(20_000, 1)), &["/new"], false, verify_new);
+    run_cached_scenario("create", |fs| fs.write_file("/new file with a long name.bin", &pattern(20_000, 1)), &["/new"], verify_new);
     // Replacing reuses the file's clusters, so after a crash its contents may be mixed; the
     // structure (entry size against its chain) must still be consistent.
-    run_cached_scenario("replace shrink", |fs| fs.write_file("/victim.bin", b"small"), &["/victim.bin"], false, no_verify);
-    run_cached_scenario("truncate shrink", |fs| fs.truncate("/victim.bin", 100), &["/victim.bin"], false, no_verify);
-    run_cached_scenario("remove file", |fs| fs.remove_file("/victim.bin"), &["/victim.bin"], false, no_verify);
-    run_cached_scenario("remove tree", |fs| fs.remove_dir_all("/docs"), &["/docs"], false, no_verify);
-    run_cached_scenario("mkdir -p", |fs| fs.create_dir_all("/a/b/c/d"), &["/a"], false, no_verify);
-    run_cached_scenario("copy", |fs| fs.copy_file("/docs/deep/deeper/big.bin", "/other/copy.bin"), &["/other"], false, no_verify);
+    run_cached_scenario("replace shrink", |fs| fs.write_file("/victim.bin", b"small"), &["/victim.bin"], no_verify);
+    run_cached_scenario("truncate shrink", |fs| fs.truncate("/victim.bin", 100), &["/victim.bin"], no_verify);
+    run_cached_scenario("remove file", |fs| fs.remove_file("/victim.bin"), &["/victim.bin"], no_verify);
+    run_cached_scenario("remove tree", |fs| fs.remove_dir_all("/docs"), &["/docs"], no_verify);
+    run_cached_scenario("mkdir -p", |fs| fs.create_dir_all("/a/b/c/d"), &["/a"], no_verify);
+    run_cached_scenario("copy", |fs| fs.copy_file("/docs/deep/deeper/big.bin", "/other/copy.bin"), &["/other"], no_verify);
     run_cached_scenario(
         "rename dir",
         |fs| fs.rename("/docs/deep", "/other/deep moved"),
         &["/docs/deep", "/other"],
-        true,
         no_verify,
     );
 }
@@ -285,7 +279,6 @@ fn crash_while_creating_many_files_with_write_back_cache() {
             Ok(())
         },
         &["/many"],
-        false,
         verify_many,
     );
 }
