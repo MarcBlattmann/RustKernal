@@ -205,9 +205,24 @@ fn mount_rejects_invalid_volumes() {
     assert!(matches!(corrupt(&|d| d[14..16].copy_from_slice(&0u16.to_le_bytes())), Error::Corrupt(_)));
     assert!(matches!(corrupt(&|d| d[44..48].copy_from_slice(&0u32.to_le_bytes())), Error::Corrupt(_)));
     assert!(matches!(corrupt(&|d| d[44..48].copy_from_slice(&u32::MAX.to_le_bytes())), Error::Corrupt(_)));
-    assert!(matches!(corrupt(&|d| d[512] = 0), Error::Corrupt(_)), "FSInfo lead signature");
-    assert!(matches!(corrupt(&|d| d[512 + 484] = 0), Error::Corrupt(_)), "FSInfo struct signature");
-    assert!(matches!(corrupt(&|d| d[512 + 510] = 0), Error::Corrupt(_)), "FSInfo trail signature");
+    // A damaged FSInfo sector is only a lost hint: the volume still mounts, the free count is
+    // recounted, the sector is left alone and check() reports it.
+    let expected_free = FileSystem::mount(good.clone()).unwrap().stats().unwrap().free_clusters;
+    for (what, offset) in [("lead", 512), ("struct", 512 + 484), ("trail", 512 + 510), ("zeroed", usize::MAX)] {
+        let mut disk = good.clone();
+        if offset == usize::MAX {
+            disk.data[512..1024].fill(0);
+        } else {
+            disk.data[offset] = 0;
+        }
+        let damaged = disk.data[512..1024].to_vec();
+        let mut fs = FileSystem::mount(disk).unwrap_or_else(|e| panic!("FSInfo {} signature: {:?}", what, e));
+        assert_eq!(fs.stats().unwrap().free_clusters, expected_free, "{}", what);
+        fs.write_file("/after.txt", b"still works").unwrap();
+        assert_eq!(fs.check().unwrap().problems, vec![String::from("invalid FSInfo sector")], "{}", what);
+        let disk = fs.unmount().unwrap();
+        assert_eq!(&disk.data[512..1024], &damaged[..], "{}: FSInfo must not be rewritten", what);
+    }
     // Larger than the device.
     assert!(matches!(
         corrupt(&|d| d[32..36].copy_from_slice(&((SMALL / 512 + 1) as u32).to_le_bytes())),
@@ -450,13 +465,15 @@ fn touch_and_timestamps() {
     fs.set_time_source(|| ts(2030, 7, 15, 13, 45, 31));
     fs.write_file("/timed", b"x").unwrap();
     let meta = fs.metadata("/timed").unwrap();
-    assert_eq!(meta.created, ts(2030, 7, 15, 13, 45, 31), "creation time keeps odd seconds");
+    // The modification time has 2-second resolution; a file created in the same odd second is not
+    // reported as created after it was modified.
+    assert_eq!(meta.created, ts(2030, 7, 15, 13, 45, 30), "created is not after modified");
     assert_eq!(meta.modified, ts(2030, 7, 15, 13, 45, 30), "2-second resolution");
 
     fs.set_time_source(|| ts(2031, 2, 3, 4, 5, 6));
     fs.append_file("/timed", b"y").unwrap();
     let meta = fs.metadata("/timed").unwrap();
-    assert_eq!(meta.created, ts(2030, 7, 15, 13, 45, 31));
+    assert_eq!(meta.created, ts(2030, 7, 15, 13, 45, 31), "creation time keeps odd seconds");
     assert_eq!(meta.modified, ts(2031, 2, 3, 4, 5, 6));
 
     fs.set_time_source(|| ts(2032, 1, 1, 0, 0, 0));
@@ -720,7 +737,7 @@ fn names_and_short_name_aliases() {
     assert_eq!(fs.read_file("/longfi~1.txt").unwrap(), b"alias");
     // A name equal to an existing alias is taken.
     assert_eq!(fs.create_dir("/LONGFI~1.TXT"), Err(Error::AlreadyExists));
-    assert_eq!(fs.write_file(&format!("/{}", "x".repeat(256)), b""), Err(Error::InvalidName));
+    assert_eq!(fs.write_file(&format!("/{}", "x".repeat(256)), b""), Err(Error::NameTooLong));
     for bad in ["/a*", "/a?", "/a:b", "/a<b", "/a>b", "/a|b", "/a\"b", "/a\\b", "/trailing.", "/trailing ", "/tab\t"] {
         assert_eq!(fs.touch(bad), Err(Error::InvalidName), "{}", bad);
     }
@@ -1011,6 +1028,7 @@ fn error_messages() {
     assert_eq!(Error::NoSpace.to_string(), "no space left on device");
     assert_eq!(Error::AlreadyExists.to_string(), "file exists");
     assert_eq!(Error::InvalidName.to_string(), "invalid file name");
+    assert_eq!(Error::NameTooLong.to_string(), "file name too long (at most 255 characters)");
     assert_eq!(Error::InvalidPath.to_string(), "invalid path");
     assert_eq!(Error::FileTooLarge.to_string(), "file too large");
     assert_eq!(Error::Corrupt("bad fat").to_string(), "file system corrupt: bad fat");

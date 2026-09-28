@@ -48,9 +48,6 @@ pub(crate) fn validate_name(name: &str) -> Result<()> {
     if name.is_empty() || name == "." || name == ".." {
         return Err(Error::InvalidName);
     }
-    if name.encode_utf16().count() > MAX_NAME_UNITS {
-        return Err(Error::InvalidName);
-    }
     if name.chars().any(is_forbidden_long) {
         return Err(Error::InvalidName);
     }
@@ -59,16 +56,37 @@ pub(crate) fn validate_name(name: &str) -> Result<()> {
     if name.ends_with('.') || name.ends_with(' ') {
         return Err(Error::InvalidName);
     }
+    if name.encode_utf16().count() > MAX_NAME_UNITS {
+        return Err(Error::NameTooLong);
+    }
     Ok(())
 }
 
-/// Case-insensitive comparison using Unicode upper-case mapping.
+/// Upper-case form of one character for name comparison: a simple one-to-one mapping like the
+/// up-case table Windows uses for FAT names. Characters whose upper case is several characters
+/// (`ß` -> `SS`, `ﬁ` -> `FI`) and characters outside the Basic Multilingual Plane stay as they
+/// are, so `straße` and `strasse` remain two different names.
+pub(crate) fn upcase(ch: char) -> char {
+    if ch.is_ascii() {
+        return ch.to_ascii_uppercase();
+    }
+    if (ch as u32) > 0xFFFF {
+        return ch;
+    }
+    let mut upper = ch.to_uppercase();
+    match (upper.next(), upper.next()) {
+        (Some(single), None) if (single as u32) <= 0xFFFF => single,
+        _ => ch,
+    }
+}
+
+/// Case-insensitive comparison, character by character with [`upcase`].
 pub(crate) fn eq_ignore_case(a: &str, b: &str) -> bool {
     if a.len() == b.len() && a.eq_ignore_ascii_case(b) {
         return true;
     }
-    let mut left = a.chars().flat_map(char::to_uppercase);
-    let mut right = b.chars().flat_map(char::to_uppercase);
+    let mut left = a.chars().map(upcase);
+    let mut right = b.chars().map(upcase);
     loop {
         match (left.next(), right.next()) {
             (None, None) => return true,
@@ -78,9 +96,10 @@ pub(crate) fn eq_ignore_case(a: &str, b: &str) -> bool {
     }
 }
 
-/// Upper-case form of a name, used as a key for duplicate detection.
+/// Upper-case form of a name, used as a key for duplicate detection (the same mapping as
+/// [`eq_ignore_case`], so `check` and lookups agree on which names are equal).
 pub(crate) fn upper_key(name: &str) -> String {
-    name.chars().flat_map(char::to_uppercase).collect()
+    name.chars().map(upcase).collect()
 }
 
 /// Display form of an 11-byte short name, honoring the NT lower-case flags.
@@ -319,10 +338,13 @@ mod tests {
         let long: String = "x".repeat(255);
         assert_eq!(validate_name(&long), Ok(()));
         let too_long: String = "x".repeat(256);
-        assert_eq!(validate_name(&too_long), Err(Error::InvalidName));
+        assert_eq!(validate_name(&too_long), Err(Error::NameTooLong));
         // 128 characters outside the BMP are 256 UTF-16 units.
         let astral: String = "😀".repeat(128);
-        assert_eq!(validate_name(&astral), Err(Error::InvalidName));
+        assert_eq!(validate_name(&astral), Err(Error::NameTooLong));
+        // A long name with a forbidden character is invalid, not just too long.
+        let bad_and_long = alloc::format!("{}?", "x".repeat(300));
+        assert_eq!(validate_name(&bad_and_long), Err(Error::InvalidName));
     }
 
     #[test]
@@ -331,6 +353,21 @@ mod tests {
         assert!(eq_ignore_case("ÜBER", "über"));
         assert!(!eq_ignore_case("abc", "abd"));
         assert!(!eq_ignore_case("abc", "abcd"));
+    }
+
+    #[test]
+    fn case_mapping_is_one_to_one() {
+        // Full Unicode case mapping would make these equal ("SS", "FI"); FAT (Windows) does not.
+        assert!(!eq_ignore_case("straße.txt", "strasse.txt"));
+        assert!(!eq_ignore_case("STRASSE.TXT", "straße.txt"));
+        assert!(!eq_ignore_case("\u{FB01}le", "FILE"));
+        assert!(eq_ignore_case("straße", "STRAßE"));
+        assert!(eq_ignore_case("ÉTÉ", "été"));
+        assert!(eq_ignore_case("ΣΊΣΥΦΟΣ", "σίσυφος"));
+        assert_ne!(upper_key("straße"), upper_key("strasse"));
+        assert_eq!(upper_key("Straße.txt"), "STRAßE.TXT");
+        assert_eq!(upcase('ß'), 'ß');
+        assert_eq!(upcase('\u{FB01}'), '\u{FB01}');
     }
 
     #[test]

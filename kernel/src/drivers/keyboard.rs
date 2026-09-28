@@ -69,7 +69,10 @@ impl Keyboard {
         let next_position = (self.write_position + 1) % self.events.len();
         if next_position != self.read_position {
             let shift = self.left_shift || self.right_shift;
-            self.events[self.write_position] = Some(KeyEvent { key, ctrl: self.ctrl, shift });
+            // Windows hosts and some keyboards send AltGr as Ctrl+AltGr. A character typed with
+            // AltGr (@ # | ~ [ ] { } \ on the Swiss layout) is text, not a Ctrl shortcut.
+            let ctrl = self.ctrl && !(self.alt_gr && matches!(key, Key::Char(_)));
+            self.events[self.write_position] = Some(KeyEvent { key, ctrl, shift });
             self.write_position = next_position;
         }
     }

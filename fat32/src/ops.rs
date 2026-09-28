@@ -36,8 +36,12 @@ pub(crate) fn mount<D: BlockDevice>(mut device: D) -> Result<FileSystem<D>> {
     if let Some(fsinfo_sector) = geo.fsinfo_sector {
         let mut buffer = [0u8; SECTOR_SIZE];
         device.read_sectors(fsinfo_sector as u64, &mut buffer)?;
-        hints = boot_sector::parse_fsinfo(&buffer)?;
-        fsinfo = Some(buffer);
+        // FSInfo is only a hint. A damaged one is ignored (and never rewritten): the free count
+        // is recounted below and `check` reports the damage.
+        if let Ok(values) = boot_sector::parse_fsinfo(&buffer) {
+            hints = values;
+            fsinfo = Some(buffer);
+        }
     }
     let mut fs = FileSystem {
         device,
@@ -50,6 +54,7 @@ pub(crate) fn mount<D: BlockDevice>(mut device: D) -> Result<FileSystem<D>> {
         volume_dirty: false,
         was_clean: false,
         read_only: false,
+        poisoned: false,
         now: time::default_now,
         chain_hints: [None; CHAIN_HINTS],
         next_hint: 0,
@@ -90,7 +95,15 @@ impl<D: BlockDevice> FileSystem<D> {
         time::encode((self.now)())
     }
 
-    /// Clears the clean-shutdown bit on disk (once per modification period).
+    /// Write barrier: everything written so far is on the disk before anything written after it.
+    /// (A write-back cache such as `CachedDevice` may reorder writes between two flushes.)
+    pub(crate) fn barrier(&mut self) -> Result<()> {
+        self.device.flush()?;
+        Ok(())
+    }
+
+    /// Clears the clean-shutdown bit on disk (once per modification period). The barrier makes
+    /// the cleared bit durable before any other write of the period.
     fn mark_dirty(&mut self) -> Result<()> {
         if self.volume_dirty {
             return Ok(());
@@ -98,6 +111,7 @@ impl<D: BlockDevice> FileSystem<D> {
         let status = self.fat_raw(1)?;
         self.fat_set_raw(1, status & !CLEAN_SHUTDOWN)?;
         self.flush_fat()?;
+        self.barrier()?;
         self.volume_dirty = true;
         Ok(())
     }
@@ -124,6 +138,9 @@ impl<D: BlockDevice> FileSystem<D> {
     pub(crate) fn mutate<T>(&mut self, op: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         if self.read_only {
             return Err(Error::Device(DeviceError::ReadOnly));
+        }
+        if self.poisoned {
+            return Err(Error::Corrupt("a failed rename could not be undone; mount the volume again and check it"));
         }
         self.mark_dirty()?;
         let result = op(self);
@@ -287,13 +304,29 @@ impl<D: BlockDevice> FileSystem<D> {
             return Err(error);
         }
         let template = short_entry(BLANK_NAME, ATTR_DIRECTORY, cluster, 0, now, now);
-        match self.create_entry(parent, name, template, None) {
+        self.create_entry_for_chain(parent, name, template, cluster)
+    }
+
+    /// Creates the entry for a new chain starting at `first` (0: no chain). If that fails, the
+    /// chain is freed again, unless the entry itself may already be on disk (then it is kept:
+    /// at worst it becomes lost clusters, never clusters a visible entry points to).
+    fn create_entry_for_chain(&mut self, dir: u32, name: &str, template: RawEntry, first: u32) -> Result<DirEntry> {
+        match self.create_entry(dir, name, template, None) {
             Ok(entry) => Ok(entry),
-            Err(error) => {
-                let _ = self.free_chain(cluster);
-                Err(error)
+            Err(failure) => {
+                if first != 0 && failure.maybe_written.is_none() {
+                    let _ = self.free_chain(first);
+                }
+                Err(failure.error)
             }
         }
+    }
+
+    /// Frees the chain at `first` after the entry that referenced it was removed: the barrier
+    /// puts the entry change on disk before the clusters can be handed out again.
+    fn release_chain(&mut self, first: u32) -> Result<()> {
+        self.barrier()?;
+        self.free_chain(first)
     }
 
     pub(crate) fn op_create_dir(&mut self, path: &str) -> Result<()> {
@@ -337,7 +370,7 @@ impl<D: BlockDevice> FileSystem<D> {
             return Err(Error::DirectoryNotEmpty);
         }
         self.delete_entry(&entry)?;
-        self.free_chain(cluster)
+        self.release_chain(cluster)
     }
 
     /// First clusters of every chain below (and including) directory `dir`.
@@ -377,6 +410,7 @@ impl<D: BlockDevice> FileSystem<D> {
         let chains = self.subtree_chains(cluster)?;
         // Unlink the whole tree with one entry deletion, then release its clusters.
         self.delete_entry(&entry)?;
+        self.barrier()?;
         for first in chains {
             self.free_chain(first)?;
         }
@@ -397,7 +431,7 @@ impl<D: BlockDevice> FileSystem<D> {
             }
             None => {
                 let template = short_entry(BLANK_NAME, ATTR_ARCHIVE, 0, 0, now, now);
-                self.create_entry(parent, name, template, None).map(|_| ())
+                self.create_entry_for_chain(parent, name, template, 0).map(|_| ())
             }
         }
     }
@@ -407,7 +441,7 @@ impl<D: BlockDevice> FileSystem<D> {
         self.delete_entry(&entry)?;
         let cluster = entry.first_cluster();
         if self.geo.is_valid_cluster(cluster) {
-            self.free_chain(cluster)?;
+            self.release_chain(cluster)?;
         }
         Ok(())
     }
@@ -436,9 +470,11 @@ impl<D: BlockDevice> FileSystem<D> {
     }
 
     /// Records the new size/first cluster/modification time in the directory entry. The FAT is
-    /// flushed first so the entry never references unlinked clusters.
+    /// flushed first and a barrier puts the data and the links on disk, so the entry never
+    /// references unlinked clusters or data that has not been written.
     fn commit_entry(&mut self, entry: &mut DirEntry, first: u32, size: u64) -> Result<()> {
         self.flush_fat()?;
+        self.barrier()?;
         entry.set_first_cluster(first);
         entry.set_size(size as u32);
         entry.set_modified(self.timestamp());
@@ -487,9 +523,10 @@ impl<D: BlockDevice> FileSystem<D> {
             }
             first
         };
-        // The entry shrinks before the clusters it no longer covers are released.
+        // The entry shrinks (on disk) before the clusters it no longer covers are released.
         self.commit_entry(entry, first, size)?;
         if had > needed {
+            self.barrier()?;
             self.shrink_chain(old_first, needed)?;
         }
         Ok(())
@@ -510,13 +547,7 @@ impl<D: BlockDevice> FileSystem<D> {
             first
         };
         let template = short_entry(BLANK_NAME, ATTR_ARCHIVE, first, data.len() as u32, now, now);
-        if let Err(error) = self.create_entry(parent, name, template, None) {
-            if first != 0 {
-                let _ = self.free_chain(first);
-            }
-            return Err(error);
-        }
-        Ok(())
+        self.create_entry_for_chain(parent, name, template, first).map(|_| ())
     }
 
     pub(crate) fn op_write_file(&mut self, path: &str, data: &[u8]) -> Result<()> {
@@ -577,9 +608,10 @@ impl<D: BlockDevice> FileSystem<D> {
         if length == old_size && had <= keep {
             return Ok(());
         }
-        // Shrink the entry first, then release the clusters it no longer covers.
+        // Shrink the entry first (on disk), then release the clusters it no longer covers.
         self.commit_entry(&mut entry, if keep == 0 { 0 } else { first }, length)?;
         if had > keep {
+            self.barrier()?;
             self.shrink_chain(first, keep)?;
         }
         Ok(())
@@ -621,13 +653,7 @@ impl<D: BlockDevice> FileSystem<D> {
         };
         let mut template = short_entry(BLANK_NAME, ATTR_ARCHIVE, first, size as u32, now, now);
         template[11] |= source.attr() & !(ATTR_DIRECTORY | crate::dir::ATTR_VOLUME_ID);
-        if let Err(error) = self.create_entry(parent, name, template, None) {
-            if first != 0 {
-                let _ = self.free_chain(first);
-            }
-            return Err(error);
-        }
-        Ok(())
+        self.create_entry_for_chain(parent, name, template, first).map(|_| ())
     }
 
     /// Points the `..` entry of directory `dir` at `parent`.
@@ -689,11 +715,50 @@ impl<D: BlockDevice> FileSystem<D> {
         // New entry first, then the old one goes away: a crash leaves two names, never none.
         let mut template = source.raw;
         template[11] |= if source.is_dir() { 0 } else { ATTR_ARCHIVE };
-        self.create_entry(target_dir, name, template, exclude)?;
-        if source.is_dir() && target_dir != source.dir_cluster {
-            let cluster = self.entry_dir_cluster(&source)?;
-            self.set_dotdot(cluster, target_dir)?;
+        let moved_dir = if source.is_dir() && target_dir != source.dir_cluster {
+            Some(self.entry_dir_cluster(&source)?)
+        } else {
+            None
+        };
+        let created = match self.create_entry(target_dir, name, template, exclude) {
+            Ok(entry) => entry,
+            Err(failure) => {
+                if let Some(entry) = failure.maybe_written {
+                    self.undo_rename(&entry, None);
+                }
+                return Err(failure.error);
+            }
+        };
+        // Both names exist now; the barrier keeps the old one until the new one is on disk.
+        let finished = (|| {
+            self.barrier()?;
+            if let Some(cluster) = moved_dir {
+                self.set_dotdot(cluster, target_dir)?;
+            }
+            self.delete_entry(&source)
+        })();
+        if let Err(error) = finished {
+            // Two entries sharing one cluster chain must not survive: removing either of them
+            // would free data the other one still points to.
+            self.undo_rename(&created, moved_dir.map(|cluster| (cluster, source.dir_cluster)));
+            return Err(error);
         }
-        self.delete_entry(&source)
+        Ok(())
+    }
+
+    /// Rolls back a rename that failed after its new entry was (possibly) written: removes the new
+    /// entry again (without freeing anything) and points a moved directory's `..` back at its old
+    /// parent. If that fails too, the volume refuses further changes until it is mounted again.
+    fn undo_rename(&mut self, created: &DirEntry, dotdot: Option<(u32, u32)>) {
+        let undone = (|| {
+            if let Some((cluster, old_parent)) = dotdot {
+                self.set_dotdot(cluster, old_parent)?;
+            }
+            self.delete_entry(created)?;
+            self.barrier()
+        })();
+        if undone.is_err() {
+            self.poisoned = true;
+        }
     }
 }

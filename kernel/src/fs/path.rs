@@ -8,11 +8,17 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 /// Resolves `path` against the working directory `cwd` (itself canonical) and returns the
-/// canonical absolute path. An empty path or `~` means the root, `~/x` is `/x`, `..` at the root
-/// stays at the root and repeated slashes collapse.
+/// canonical absolute path. `~` means the root, `~/x` is `/x`, `..` at the root stays at the root
+/// and repeated slashes collapse. Spaces are part of names (the command line parser already
+/// removed the unquoted ones), so ` x` names a file whose name starts with a space.
+///
+/// An empty path names nothing: it stays empty, which is not an absolute path, so every file
+/// system call rejects it (`invalid path`) instead of acting on the root or the working directory.
 pub fn normalize(cwd: &str, path: &str) -> String {
-    let path = path.trim();
-    let (base, rest) = if path.is_empty() || path == "~" {
+    if path.is_empty() {
+        return String::new();
+    }
+    let (base, rest) = if path == "~" {
         ("/", "")
     } else if let Some(rest) = path.strip_prefix("~/") {
         ("/", rest)
@@ -68,18 +74,24 @@ pub fn parent(path: &str) -> &str {
     }
 }
 
-/// Case-insensitive equality, the way FAT compares names.
-pub fn same_path(a: &str, b: &str) -> bool {
-    a.to_lowercase() == b.to_lowercase()
+/// Whether a path argument as typed must name a directory: it ends with `/` or `/.` (like
+/// `archive/`), as on Unix.
+pub fn names_directory(argument: &str) -> bool {
+    argument.len() > 1 && (argument.ends_with('/') || argument.ends_with("/."))
 }
 
-/// Whether canonical `path` is `ancestor` itself or lies below it (case-insensitive).
+/// The last component of a path argument as typed, ignoring trailing slashes (`a/b/` -> `b`).
+pub fn last_component(argument: &str) -> &str {
+    file_name(argument.trim_end_matches('/'))
+}
+
+/// Whether `path` is `ancestor` itself or lies below it. Both must be spelled exactly as stored
+/// on disk (see the shell's `canonical_case`), so the comparison is exact.
 pub fn is_within(path: &str, ancestor: &str) -> bool {
     if ancestor == "/" {
         return true;
     }
-    let (path, ancestor) = (path.to_lowercase(), ancestor.to_lowercase());
-    path == ancestor || path.strip_prefix(&ancestor).is_some_and(|rest| rest.starts_with('/'))
+    path == ancestor || path.strip_prefix(ancestor).is_some_and(|rest| rest.starts_with('/'))
 }
 
 #[cfg(test)]
@@ -88,7 +100,8 @@ mod tests {
 
     #[test]
     fn normalizes() {
-        assert_eq!(normalize("/", ""), "/");
+        assert_eq!(normalize("/", ""), "");
+        assert_eq!(normalize("/docs", ""), "");
         assert_eq!(normalize("/docs", "~"), "/");
         assert_eq!(normalize("/docs", "~/a/b"), "/a/b");
         assert_eq!(normalize("/docs", "a"), "/docs/a");
@@ -98,7 +111,9 @@ mod tests {
         assert_eq!(normalize("/a/b", "../c"), "/a/c");
         assert_eq!(normalize("/a", "//x///y//"), "/x/y");
         assert_eq!(normalize("/a", "/"), "/");
-        assert_eq!(normalize("/a", "  b  "), "/a/b");
+        assert_eq!(normalize("/a", " b"), "/a/ b");
+        assert_eq!(normalize("/a", "b "), "/a/b ");
+        assert_eq!(normalize("/a", " "), "/a/ ");
         assert_eq!(normalize("/a", "my file.txt"), "/a/my file.txt");
         assert_eq!(normalize("/", "a/../../b"), "/b");
         assert_eq!(normalize("/", "~x"), "/~x");
@@ -117,11 +132,23 @@ mod tests {
 
     #[test]
     fn compares() {
-        assert!(same_path("/Docs/A.TXT", "/docs/a.txt"));
-        assert!(!same_path("/docs/a", "/docs/b"));
         assert!(is_within("/a/b", "/a"));
-        assert!(is_within("/A", "/a"));
+        assert!(is_within("/a", "/a"));
         assert!(!is_within("/ab", "/a"));
         assert!(is_within("/anything", "/"));
+    }
+
+    #[test]
+    fn directory_arguments() {
+        assert!(names_directory("archive/"));
+        assert!(names_directory("a/b/"));
+        assert!(names_directory("dir/."));
+        assert!(!names_directory("/"));
+        assert!(!names_directory("file.txt"));
+        assert!(!names_directory("."));
+        assert_eq!(last_component("a/b/"), "b");
+        assert_eq!(last_component(".."), "..");
+        assert_eq!(last_component("x/.."), "..");
+        assert_eq!(last_component("./"), ".");
     }
 }

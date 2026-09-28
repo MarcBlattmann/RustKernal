@@ -136,16 +136,42 @@ impl DirEntry {
 
     pub fn metadata(&self) -> Metadata {
         let attr = self.attr();
+        let created = time::decode(le16(&self.raw, 16), le16(&self.raw, 14), self.raw[13]);
+        let modified = time::decode(le16(&self.raw, 24), le16(&self.raw, 22), 0);
+        // The creation time has 10 ms resolution but the modification time only 2 s, so a file
+        // created and written in the same odd second would look modified before it was created.
+        let created = if modified != crate::Timestamp::default() && created > modified { modified } else { created };
         Metadata {
             name: self.name(),
             is_dir: self.is_dir(),
             size: if self.is_dir() { 0 } else { self.size() as u64 },
-            created: time::decode(le16(&self.raw, 16), le16(&self.raw, 14), self.raw[13]),
-            modified: time::decode(le16(&self.raw, 24), le16(&self.raw, 22), 0),
+            created,
+            modified,
             read_only: attr & ATTR_READ_ONLY != 0,
             hidden: attr & ATTR_HIDDEN != 0,
             system: attr & ATTR_SYSTEM != 0,
         }
+    }
+}
+
+/// Why [`FileSystem::create_entry`] failed.
+#[derive(Debug)]
+pub(crate) struct CreateFailure {
+    pub error: Error,
+    /// Set when writing the short entry itself failed: the entry may have reached the disk, so the
+    /// clusters it references must not be freed.
+    pub maybe_written: Option<DirEntry>,
+}
+
+impl From<Error> for CreateFailure {
+    fn from(error: Error) -> Self {
+        CreateFailure { error, maybe_written: None }
+    }
+}
+
+impl From<crate::DeviceError> for CreateFailure {
+    fn from(error: crate::DeviceError) -> Self {
+        CreateFailure { error: Error::Device(error), maybe_written: None }
     }
 }
 
@@ -488,25 +514,32 @@ impl<D: BlockDevice> FileSystem<D> {
         if reader.slots_read() >= MAX_DIR_ENTRIES || total_slots > MAX_DIR_ENTRIES as u64 {
             return Err(Error::NoSpace);
         }
+        // The new clusters are zeroed as a chain of their own and linked to the directory only
+        // once the zeros are on disk; otherwise a crash could append garbage to the directory.
         let last = reader.cluster();
-        let first_new = self.allocate(Some(last), new_clusters)?;
+        let first_new = self.allocate(None, new_clusters)?;
         let zeros = vec![0u8; self.geo.cluster_size as usize];
         let mut cluster = first_new;
-        for i in 0..new_clusters {
-            if let Err(error) = self.write_cluster(cluster, &zeros) {
-                let _ = self.free_chain(first_new);
-                let _ = self.fat_set(last, crate::fat::EOC);
-                return Err(error);
-            }
-            for slot in 0..per_cluster {
-                if run.len() < count {
-                    run.push(SlotLoc { cluster, offset: (slot * ENTRY_SIZE) as u32 });
+        let mut new_slots = Vec::new();
+        let zeroed = (|| {
+            for i in 0..new_clusters {
+                self.write_cluster(cluster, &zeros)?;
+                for slot in 0..per_cluster {
+                    if run.len() + new_slots.len() < count {
+                        new_slots.push(SlotLoc { cluster, offset: (slot * ENTRY_SIZE) as u32 });
+                    }
+                }
+                if i + 1 < new_clusters {
+                    cluster = self.next_cluster(cluster)?.ok_or(Error::Corrupt("directory growth failed"))?;
                 }
             }
-            if i + 1 < new_clusters {
-                cluster = self.next_cluster(cluster)?.ok_or(Error::Corrupt("directory growth failed"))?;
-            }
+            self.barrier()
+        })();
+        if let Err(error) = zeroed.and_then(|()| self.fat_set(last, first_new)) {
+            let _ = self.free_chain(first_new);
+            return Err(error);
         }
+        run.extend(new_slots);
         Ok((run, None))
     }
 
@@ -539,17 +572,26 @@ impl<D: BlockDevice> FileSystem<D> {
         self.edit_slots(&slots, |i, raw| raw.copy_from_slice(&writes[i].1))
     }
 
+    /// Sector holding a directory slot.
+    fn slot_lba(&self, loc: SlotLoc) -> u64 {
+        self.geo.cluster_lba(loc.cluster) + (loc.offset as usize / SECTOR_SIZE) as u64
+    }
+
     /// Creates the entries (long name + short entry) for `name` in directory `dir`. `template`
     /// supplies attributes, timestamps, first cluster and size; its name bytes are replaced.
-    /// Flushes the FAT before writing, so every cluster the entry references (and any new
-    /// directory cluster) is linked on disk before it becomes reachable.
+    ///
+    /// Write order: the FAT is flushed and a barrier makes every cluster the entry references
+    /// (data, links, new directory clusters) durable first. Then the long-name entries and the
+    /// end-of-directory marker that are not in the short entry's sector are written (followed by
+    /// another barrier), and the short entry's sector comes last: only that write makes the entry
+    /// visible. [`CreateFailure::maybe_written`] tells the caller whether that write was attempted.
     pub(crate) fn create_entry(
         &mut self,
         dir: u32,
         name: &str,
         template: RawEntry,
         exclude: Option<[u8; 11]>,
-    ) -> Result<DirEntry> {
+    ) -> core::result::Result<DirEntry, CreateFailure> {
         name::validate_name(name)?;
         let existing = self.short_names_in(dir, exclude)?;
         let (short, needs_long) = name::generate_short_name(name, &existing)?;
@@ -560,17 +602,29 @@ impl<D: BlockDevice> FileSystem<D> {
         entries.push(raw);
         let (slots, clear) = self.find_free_slots(dir, entries.len())?;
         self.flush_fat()?;
-        let mut writes: Vec<(SlotLoc, RawEntry)> = slots.iter().copied().zip(entries.iter().copied()).collect();
-        if let Some(clear) = clear {
-            writes.push((clear, [0u8; ENTRY_SIZE]));
+        self.barrier()?;
+
+        let sfn_lba = self.slot_lba(*slots.last().expect("at least the short entry"));
+        let mut before: Vec<(SlotLoc, RawEntry)> = Vec::new();
+        let mut last: Vec<(SlotLoc, RawEntry)> = Vec::new();
+        let clear_write = clear.map(|slot| (slot, [0u8; ENTRY_SIZE]));
+        for write in slots.iter().copied().zip(entries.iter().copied()).chain(clear_write) {
+            if self.slot_lba(write.0) == sfn_lba { last.push(write) } else { before.push(write) }
         }
-        self.write_slots(&writes)?;
-        Ok(DirEntry {
+        if !before.is_empty() {
+            self.write_slots(&before)?;
+            self.barrier()?;
+        }
+        let entry = DirEntry {
             raw,
             long_name: if needs_long { Some(String::from(name)) } else { None },
             dir_cluster: dir,
             slots,
-        })
+        };
+        if let Err(error) = self.write_slots(&last) {
+            return Err(CreateFailure { error, maybe_written: Some(entry) });
+        }
+        Ok(entry)
     }
 
     /// Marks an entry and its long-name entries deleted (short entry first).
@@ -677,8 +731,16 @@ mod tests {
         assert_eq!(entry.name(), "FILE.TXT");
         assert!(entry.matches("file.txt"));
         let meta = entry.metadata();
-        assert_eq!(meta.created, crate::Timestamp { year: 2030, month: 5, day: 6, hour: 7, minute: 8, second: 9 });
+        // Created and modified in the same odd second: the creation time is not reported after
+        // the (2-second resolution) modification time.
+        assert_eq!(meta.created, crate::Timestamp { year: 2030, month: 5, day: 6, hour: 7, minute: 8, second: 8 });
         assert_eq!(meta.modified, crate::Timestamp { year: 2030, month: 5, day: 6, hour: 7, minute: 8, second: 8 });
+        assert!(meta.created <= meta.modified);
         assert!(!meta.is_dir);
+        // Modified later: the odd creation second is kept.
+        let later = time::encode(crate::Timestamp { year: 2030, month: 5, day: 6, hour: 7, minute: 9, second: 0 });
+        let raw = short_entry(*b"FILE    TXT", ATTR_ARCHIVE, 0, 0, t, later);
+        let entry = DirEntry { raw, long_name: None, dir_cluster: 2, slots: vec![SlotLoc { cluster: 2, offset: 0 }] };
+        assert_eq!(entry.metadata().created.second, 9);
     }
 }

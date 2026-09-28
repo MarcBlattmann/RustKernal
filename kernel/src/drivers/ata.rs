@@ -106,14 +106,18 @@ const LBA28_LIMIT: u64 = 1 << 28;
 const MAX_SECTORS_PER_COMMAND: usize = 128;
 
 const MILLISECOND: u64 = 1_000_000;
-/// How long a drive may stay busy for a data transfer before the request fails.
+/// How long a drive may stay busy before it accepts a command or delivers the first sector of a
+/// transfer. A disk in standby spins up first, which can take well over ten seconds.
+const SPIN_UP_TIMEOUT: u64 = 30_000 * MILLISECOND;
+/// How long a drive may stay busy between the sectors of a transfer that is already running.
 const COMMAND_TIMEOUT: u64 = 5_000 * MILLISECOND;
 /// Flushing a write cache can take a while on real hardware.
 const FLUSH_TIMEOUT: u64 = 30_000 * MILLISECOND;
 /// Detection budget per step; an absent device answers immediately, a present one within this.
 const DETECT_TIMEOUT: u64 = 2_000 * MILLISECOND;
-/// Spinning drives may take several seconds to come back from a software reset.
-const RESET_TIMEOUT: u64 = 5_000 * MILLISECOND;
+/// After a software reset device 0 may keep BSY set for up to 31 seconds (ATA/ATAPI-6), e.g.
+/// while it spins up.
+const RESET_TIMEOUT: u64 = 31_000 * MILLISECOND;
 
 const DRIVE_NAMES: [&str; 4] = ["hd0", "hd1", "hd2", "hd3"];
 
@@ -230,7 +234,8 @@ impl Channel {
     }
 
     /// Resets both devices on the channel and leaves interrupts disabled. Afterwards the master is
-    /// selected and both devices show their type signature.
+    /// selected and not busy; the slave may still be busy (`identify` waits for it) and both
+    /// devices show their type signature once they are done.
     fn software_reset(&self) -> Result<(), Failure> {
         self.write_device_control(CONTROL_SOFTWARE_RESET | CONTROL_DISABLE_INTERRUPTS);
         // SRST must stay asserted for at least 5 us.
@@ -254,9 +259,9 @@ impl Channel {
     fn issue(&self, slave: bool, lba: u64, count: usize, lba48: bool, command: u8) -> Result<(), Failure> {
         // The registers may only be written while the currently selected device is idle, and the
         // newly selected one must be idle before it accepts a command.
-        self.wait_not_busy(COMMAND_TIMEOUT)?;
+        self.wait_not_busy(SPIN_UP_TIMEOUT)?;
         self.select(slave, if lba48 { 0 } else { (lba >> 24) as u8 });
-        self.wait_not_busy(COMMAND_TIMEOUT)?;
+        self.wait_not_busy(SPIN_UP_TIMEOUT)?;
         if lba48 {
             // High-order bytes first; each register is a two-deep FIFO.
             self.write_register(REGISTER_FEATURES, 0);
@@ -302,6 +307,17 @@ impl Channel {
 
     fn identify(&self, slave: bool) -> Probe {
         self.select(slave, 0);
+        // No device answers with status 0 (or 0xFF on a floating bus).
+        let status = self.status();
+        if status == 0 || status == STATUS_FLOATING_BUS {
+            return Probe::Absent;
+        }
+        // `software_reset` only waited for device 0. Device 1 may finish its reset (or power-on
+        // diagnostics) much later, and it ignores command-block writes while BSY is set, so the
+        // IDENTIFY below would be lost.
+        if self.wait_not_busy(RESET_TIMEOUT).is_err() {
+            return Probe::Unresponsive;
+        }
         self.write_register(REGISTER_SECTOR_COUNT, 0);
         self.write_register(REGISTER_LBA_LOW, 0);
         self.write_register(REGISTER_LBA_MID, 0);
@@ -309,7 +325,7 @@ impl Channel {
         self.write_register(REGISTER_COMMAND, COMMAND_IDENTIFY);
         self.delay_400ns();
 
-        // No device answers with status 0 (or 0xFF on a floating bus).
+        // A device that is not there (e.g. a slave a master shadows) still reads 0 here.
         let status = self.status();
         if status == 0 || status == STATUS_FLOATING_BUS {
             return Probe::Absent;
@@ -522,10 +538,6 @@ impl AtaDrive {
         self.info.clone()
     }
 
-    pub fn name(&self) -> &'static str {
-        self.info.name
-    }
-
     /// Checks that a request of `length` bytes covers whole sectors that all lie on the drive.
     fn check_request(&self, lba: u64, length: usize) -> Result<(), DeviceError> {
         if length % SECTOR_SIZE != 0 {
@@ -537,9 +549,11 @@ impl AtaDrive {
         }
     }
 
-    /// Picks the 28-bit command unless the transfer touches sectors at or above 2^28.
+    /// Picks the 28-bit command unless the transfer touches sector 2^28 - 1 or above: on drives
+    /// larger than 128 GiB the highest sector a 28-bit command may address is 0x0FFFFFFE
+    /// (IDENTIFY words 60-61 read 0x0FFFFFFF), like Linux's `lba_28_ok`.
     fn needs_lba48(&self, lba: u64, count: usize) -> Result<bool, DeviceError> {
-        let needs_lba48 = lba + count as u64 > LBA28_LIMIT;
+        let needs_lba48 = lba + count as u64 >= LBA28_LIMIT;
         if needs_lba48 && !self.info.lba48 {
             return Err(DeviceError::OutOfRange);
         }
@@ -560,11 +574,13 @@ impl AtaDrive {
         let count = buffer.len() / SECTOR_SIZE;
         let command = if lba48 { COMMAND_READ_SECTORS_EXT } else { COMMAND_READ_SECTORS };
         self.channel.issue(self.slave, lba, count, lba48, command)?;
-        for sector in buffer.chunks_exact_mut(SECTOR_SIZE) {
-            self.channel.wait_data_request(COMMAND_TIMEOUT)?;
+        for (index, sector) in buffer.chunks_exact_mut(SECTOR_SIZE).enumerate() {
+            self.channel.wait_data_request(if index == 0 { SPIN_UP_TIMEOUT } else { COMMAND_TIMEOUT })?;
             self.channel.read_sector_data(sector);
+            // The status register may still show the previous sector's DRQ for one PIO cycle;
+            // wait before polling it for the next sector (ATA/ATAPI-6 PIO data-in protocol).
+            self.channel.delay_400ns();
         }
-        self.channel.delay_400ns();
         self.channel.wait_ready(COMMAND_TIMEOUT)?;
         Ok(())
     }
@@ -573,12 +589,14 @@ impl AtaDrive {
         let count = buffer.len() / SECTOR_SIZE;
         let command = if lba48 { COMMAND_WRITE_SECTORS_EXT } else { COMMAND_WRITE_SECTORS };
         self.channel.issue(self.slave, lba, count, lba48, command)?;
-        for sector in buffer.chunks_exact(SECTOR_SIZE) {
-            self.channel.wait_data_request(COMMAND_TIMEOUT)?;
+        for (index, sector) in buffer.chunks_exact(SECTOR_SIZE).enumerate() {
+            self.channel.wait_data_request(if index == 0 { SPIN_UP_TIMEOUT } else { COMMAND_TIMEOUT })?;
             self.channel.write_sector_data(sector);
+            // Give the drive a PIO cycle to take the sector (and raise BSY) before the status
+            // register is polled again (ATA/ATAPI-6 PIO data-out protocol).
+            self.channel.delay_400ns();
         }
         // The last sector is committed (to the drive's cache) once BSY clears again.
-        self.channel.delay_400ns();
         self.channel.wait_ready(COMMAND_TIMEOUT)?;
         Ok(())
     }
@@ -619,9 +637,9 @@ impl BlockDevice for AtaDrive {
         }
         let _lock = CHANNEL_LOCKS[self.channel.index].lock();
         let result = (|| {
-            self.channel.wait_not_busy(COMMAND_TIMEOUT)?;
+            self.channel.wait_not_busy(SPIN_UP_TIMEOUT)?;
             self.channel.select(self.slave, 0);
-            self.channel.wait_not_busy(COMMAND_TIMEOUT)?;
+            self.channel.wait_not_busy(SPIN_UP_TIMEOUT)?;
             let command = if self.supports_flush_ext { COMMAND_FLUSH_CACHE_EXT } else { COMMAND_FLUSH_CACHE };
             self.channel.write_register(REGISTER_COMMAND, command);
             self.channel.delay_400ns();

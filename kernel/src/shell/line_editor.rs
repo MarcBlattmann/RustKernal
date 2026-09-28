@@ -60,12 +60,13 @@ impl LineEditor {
         self.render(terminal);
     }
 
-    /// Replaces the characters from `start` up to the cursor with `text` and puts the cursor
-    /// behind it (used by tab completion).
-    pub fn replace_before_cursor(&mut self, terminal: &mut Terminal, start: usize, text: &str) {
-        let start = start.min(self.cursor);
-        self.buffer.splice(start..self.cursor, text.chars());
-        self.cursor = start + text.chars().count();
+    /// Replaces the characters `start..end` with `text` and puts the cursor `back` characters
+    /// before the end of the inserted text (used by tab completion).
+    pub fn replace_range(&mut self, terminal: &mut Terminal, start: usize, end: usize, text: &str, back: usize) {
+        let end = end.min(self.buffer.len());
+        let start = start.min(end);
+        self.buffer.splice(start..end, text.chars());
+        self.cursor = start + text.chars().count().saturating_sub(back);
         self.render(terminal);
     }
 

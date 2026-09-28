@@ -59,6 +59,7 @@ fn is_not_found(error: &fat32::Error) -> bool {
 }
 
 fn fail(shell: &mut Shell, command: &str, subject: &str, error: impl fmt::Display) {
+    let subject = if subject.is_empty() { "''" } else { subject };
     shell.print_error(&format!("{}: {}: {}", command, subject, error));
 }
 
@@ -96,18 +97,51 @@ fn resolve(shell: &Shell, argument: &str) -> String {
     fs::normalize(&shell.cwd, argument)
 }
 
-pub fn human_size(bytes: u64) -> String {
-    const UNITS: [&str; 4] = ["KiB", "MiB", "GiB", "TiB"];
+const SIZE_UNITS: [&str; 4] = ["KiB", "MiB", "GiB", "TiB"];
+
+/// `bytes` in tenths of `1024^(unit + 1)`, rounded to the nearest tenth.
+fn size_tenths(bytes: u64, unit: usize) -> u128 {
+    let divisor = 1024u128 << (10 * unit);
+    (bytes as u128 * 10 + divisor / 2) / divisor
+}
+
+/// The unit `human_size` shows `bytes` in (an index into `SIZE_UNITS`); `None` for plain bytes.
+fn size_unit(bytes: u64) -> Option<usize> {
     if bytes < 1024 {
-        return format!("{} B", bytes);
+        return None;
     }
     let mut unit = 0;
-    let mut scaled = bytes as u128 * 10 / 1024;
-    while scaled >= 10240 && unit + 1 < UNITS.len() {
-        scaled /= 1024;
+    // Rounding may carry into the next unit (1023.96 KiB is 1.0 MiB, not 1024.0 KiB).
+    while size_tenths(bytes, unit) >= 10240 && unit + 1 < SIZE_UNITS.len() {
         unit += 1;
     }
-    format!("{}.{} {}", scaled / 10, scaled % 10, UNITS[unit])
+    Some(unit)
+}
+
+fn format_tenths(tenths: u128, unit: usize) -> String {
+    format!("{}.{} {}", tenths / 10, tenths % 10, SIZE_UNITS[unit])
+}
+
+/// `bytes` in the largest binary unit that keeps the number below 1024, rounded to one decimal.
+pub fn human_size(bytes: u64) -> String {
+    match size_unit(bytes) {
+        Some(unit) => format_tenths(size_tenths(bytes, unit), unit),
+        None => format!("{} B", bytes),
+    }
+}
+
+/// `human_size` of a volume's used and free bytes. When size, used and free share a unit the free
+/// value is the shown size minus the shown used value, so the two always add up to the size (each
+/// rounded on its own, 10.56 + 114.46 = 125.02 MiB would read 10.6 + 114.5 = 125.1).
+fn used_and_free(used: u64, free: u64, total: u64) -> (String, String) {
+    match (size_unit(used), size_unit(free), size_unit(total)) {
+        (Some(a), Some(b), Some(c)) if a == c && b == c => {
+            let (total_tenths, used_tenths) = (size_tenths(total, c), size_tenths(used, c));
+            let free_tenths = total_tenths.saturating_sub(used_tenths);
+            (format_tenths(used_tenths, c), format_tenths(free_tenths, c))
+        }
+        _ => (human_size(used), human_size(free)),
+    }
 }
 
 fn format_timestamp(timestamp: &Timestamp, seconds: bool) -> String {
@@ -129,7 +163,8 @@ fn sort_entries(entries: &mut [Metadata]) {
     entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
 }
 
-/// `path` with every component spelled the way it is stored on disk.
+/// `path` with every component spelled the way it is stored on disk (long names, even where the
+/// path used another case or an 8.3 alias such as `LONGFI~1.TXT`).
 fn canonical_case(volume: &mut Volume, path: &str) -> fat32::Result<String> {
     let mut canonical = String::from("/");
     for component in path.split('/').filter(|component| !component.is_empty()) {
@@ -137,6 +172,64 @@ fn canonical_case(volume: &mut Volume, path: &str) -> fat32::Result<String> {
         canonical = path::join(&canonical, &metadata.name);
     }
     Ok(canonical)
+}
+
+/// Like [`canonical_case`] for a path that may not exist yet: the existing leading components are
+/// spelled as stored, the rest as given.
+fn canonical_prefix(volume: &mut Volume, path: &str) -> fat32::Result<String> {
+    let mut canonical = String::from("/");
+    let mut exists = true;
+    for component in path.split('/').filter(|component| !component.is_empty()) {
+        let next = path::join(&canonical, component);
+        canonical = if exists {
+            match volume.metadata(&next) {
+                Ok(metadata) => path::join(&canonical, &metadata.name),
+                Err(fat32::Error::NotFound) => {
+                    exists = false;
+                    next
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            next
+        };
+    }
+    Ok(canonical)
+}
+
+/// Whether two paths name the same directory entry. Comparing the typed strings is not enough:
+/// FAT matches names case-insensitively and also by their 8.3 alias.
+fn same_entry(volume: &mut Volume, a: &str, b: &str) -> fat32::Result<bool> {
+    if a == b {
+        return Ok(true);
+    }
+    let canonical = |volume: &mut Volume, path: &str| match canonical_case(volume, path) {
+        Ok(canonical) => Ok(Some(canonical)),
+        Err(fat32::Error::NotFound | fat32::Error::NotADirectory) => Ok(None),
+        Err(error) => Err(error),
+    };
+    match (canonical(volume, a)?, canonical(volume, b)?) {
+        (Some(a), Some(b)) => Ok(a == b),
+        _ => Ok(false),
+    }
+}
+
+/// An argument typed with a trailing slash (`archive/`) must name an existing directory.
+fn check_directory_argument(volume: &mut Volume, argument: &str, path: &str) -> Result<(), OpError> {
+    if !path::names_directory(argument) {
+        return Ok(());
+    }
+    match volume.metadata(path) {
+        Ok(metadata) if metadata.is_dir => Ok(()),
+        Ok(_) => Err(fat32::Error::NotADirectory.into()),
+        Err(fat32::Error::NotFound) => Err(OpError::Message("no such directory")),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// `.` and `..` (also as `dir/..`) are never removed, like on Unix.
+fn is_dot_or_dot_dot(argument: &str) -> bool {
+    matches!(path::last_component(argument), "." | "..")
 }
 
 // ----- startup and completion ------------------------------------------------------------------
@@ -179,7 +272,8 @@ pub fn print_storage_status(shell: &mut Shell) {
 /// Drive names for Tab completion: drives and partitions for `mount`, whole drives for `format`.
 pub fn drive_names(with_partitions: bool) -> Vec<String> {
     let mut names = Vec::new();
-    for drive in fs::drives().into_iter().filter(|drive| !drive.is_boot) {
+    let usable = |drive: &fs::Drive| if with_partitions { !drive.is_boot } else { drive.check_formattable().is_ok() };
+    for drive in fs::drives().into_iter().filter(usable) {
         names.push(String::from(drive.name));
         if with_partitions {
             for partition in &drive.partitions {
@@ -232,35 +326,52 @@ pub fn ls(shell: &mut Shell, arguments: &[&str]) {
     let all = flags.contains(&'a');
     let targets = if operands.is_empty() { vec!["."] } else { operands };
 
-    for (index, &target) in targets.iter().enumerate() {
+    // Like GNU ls: files given as operands are listed together first, then each directory.
+    enum Listing {
+        File(Metadata),
+        Directory(Vec<Metadata>),
+    }
+    let mut files = Vec::new();
+    let mut directories = Vec::new();
+    for &target in &targets {
         let path = resolve(shell, target);
         let listing = on_volume(|volume| {
+            check_directory_argument(volume, target, &path)?;
             let metadata = volume.metadata(&path)?;
             if metadata.is_dir {
-                Ok((true, volume.read_dir(&path)?))
+                Ok(Listing::Directory(volume.read_dir(&path)?))
             } else {
-                Ok((false, vec![Metadata { name: String::from(target), ..metadata }]))
+                Ok(Listing::File(Metadata { name: String::from(target), ..metadata }))
             }
         });
-        let (is_dir, mut entries) = match listing {
-            Ok(listing) => listing,
-            Err(error) => {
-                fail(shell, "ls", target, error);
-                continue;
-            }
-        };
+        match listing {
+            Ok(Listing::File(metadata)) => files.push(metadata),
+            Ok(Listing::Directory(entries)) => directories.push((target, entries)),
+            Err(error) => fail(shell, "ls", target, error),
+        }
+    }
+
+    if !files.is_empty() {
+        sort_entries(&mut files);
+        if long {
+            print_long_listing(shell, &files, false);
+        } else {
+            print_short_listing(shell, &files);
+        }
+    }
+    for (index, (target, mut entries)) in directories.into_iter().enumerate() {
         if targets.len() > 1 {
-            if index > 0 {
+            if index > 0 || !files.is_empty() {
                 shell.println("");
             }
             shell.println_colored(&format!("{}:", target), theme::MUTED);
         }
-        if is_dir && !all {
+        if !all {
             entries.retain(|entry| !entry.hidden && !entry.system);
         }
         sort_entries(&mut entries);
         if long {
-            print_long_listing(shell, &entries);
+            print_long_listing(shell, &entries, true);
         } else {
             print_short_listing(shell, &entries);
         }
@@ -295,7 +406,8 @@ fn print_short_listing(shell: &mut Shell, entries: &[Metadata]) {
     }
 }
 
-fn print_long_listing(shell: &mut Shell, entries: &[Metadata]) {
+/// `ls -l` lines; `summary` adds the directory/file count line under a directory listing.
+fn print_long_listing(shell: &mut Shell, entries: &[Metadata], summary: bool) {
     let (mut directories, mut files, mut bytes) = (0, 0, 0u64);
     for entry in entries {
         let attributes = format!(
@@ -315,6 +427,9 @@ fn print_long_listing(shell: &mut Shell, entries: &[Metadata]) {
             files += 1;
             bytes += entry.size;
         }
+    }
+    if !summary {
+        return;
     }
     shell.println_colored(
         &format!(
@@ -416,6 +531,10 @@ pub fn rmdir(shell: &mut Shell, arguments: &[&str]) {
         return usage(shell, "rmdir");
     }
     for &argument in arguments {
+        if is_dot_or_dot_dot(argument) {
+            fail(shell, "rmdir", argument, "refusing to remove '.' or '..'");
+            continue;
+        }
         let path = resolve(shell, argument);
         if let Err(error) = fs::with_volume(|volume| volume.remove_dir(&path)) {
             fail(shell, "rmdir", argument, error);
@@ -429,7 +548,11 @@ pub fn touch(shell: &mut Shell, arguments: &[&str]) {
     }
     for &argument in arguments {
         let path = resolve(shell, argument);
-        if let Err(error) = fs::with_volume(|volume| volume.touch(&path)) {
+        let result = on_volume(|volume| {
+            check_directory_argument(volume, argument, &path)?;
+            Ok(volume.touch(&path)?)
+        });
+        if let Err(error) = result {
             fail(shell, "touch", argument, error);
         }
     }
@@ -442,7 +565,11 @@ pub fn write(shell: &mut Shell, arguments: &[&str]) {
         text.push('\n');
     }
     let path = resolve(shell, file);
-    if let Err(error) = fs::with_volume(|volume| volume.write_file(&path, text.as_bytes())) {
+    let result = on_volume(|volume| {
+        check_directory_argument(volume, file, &path)?;
+        Ok(volume.write_file(&path, text.as_bytes())?)
+    });
+    if let Err(error) = result {
         fail(shell, "write", file, error);
     }
 }
@@ -455,6 +582,10 @@ pub fn rm(shell: &mut Shell, arguments: &[&str]) {
     let recursive = flags.contains(&'r');
     let force = flags.contains(&'f');
     for argument in operands {
+        if is_dot_or_dot_dot(argument) {
+            fail(shell, "rm", argument, "refusing to remove '.' or '..'");
+            continue;
+        }
         let path = resolve(shell, argument);
         if path == "/" {
             fail(shell, "rm", argument, "refusing to remove the root directory");
@@ -465,6 +596,9 @@ pub fn rm(shell: &mut Shell, arguments: &[&str]) {
                 Err(error) if force && is_not_found(&error) => return Ok(()),
                 other => other?,
             };
+            if path::names_directory(argument) && !metadata.is_dir {
+                return Err(fat32::Error::NotADirectory.into());
+            }
             if metadata.is_dir {
                 if !recursive {
                     return Err(OpError::Message("is a directory (use rm -r)"));
@@ -483,14 +617,13 @@ pub fn rm(shell: &mut Shell, arguments: &[&str]) {
 
 // ----- moving and copying ----------------------------------------------------------------------
 
-/// Where `source` ends up for `mv`/`cp` with destination `destination`: inside it when it is an
-/// existing directory.
-fn destination_for(volume: &mut Volume, source: &str, destination: &str) -> fat32::Result<String> {
-    if path::same_path(source, destination) {
-        return Ok(String::from(destination));
-    }
+/// Where `source` (stored under the name `source_name`) ends up for `mv`/`cp` with destination
+/// `destination`: inside it when it is an existing directory other than the source itself.
+fn destination_for(volume: &mut Volume, source: &str, source_name: &str, destination: &str) -> fat32::Result<String> {
     match volume.metadata(destination) {
-        Ok(metadata) if metadata.is_dir => Ok(path::join(destination, path::file_name(source))),
+        // `mv dir DIR` names the source itself (in another case or by its 8.3 alias): a rename.
+        Ok(metadata) if metadata.is_dir && same_entry(volume, source, destination)? => Ok(String::from(destination)),
+        Ok(metadata) if metadata.is_dir => Ok(path::join(destination, source_name)),
         Ok(_) => Ok(String::from(destination)),
         Err(error) if is_not_found(&error) => Ok(String::from(destination)),
         Err(error) => Err(error),
@@ -522,40 +655,114 @@ fn sources_and_destination<'a>(shell: &mut Shell, command: &str, operands: &[&'a
     Some((sources.to_vec(), destination))
 }
 
+/// The `mv`/`cp` operand an error is about, so it is reported against the right path.
+enum Blame {
+    Source(OpError),
+    Destination(OpError),
+}
+
+fn source_error(error: impl Into<OpError>) -> Blame {
+    Blame::Source(error.into())
+}
+
+fn destination_error(error: impl Into<OpError>) -> Blame {
+    Blame::Destination(error.into())
+}
+
+/// Prints a `mv`/`cp` error. Destination errors name the destination as typed, plus the source's
+/// name when the source was going into that directory.
+fn fail_blamed(shell: &mut Shell, command: &str, arguments: (&str, &str), into_directory: Option<&str>, blame: Blame) {
+    let (source_argument, destination_argument) = arguments;
+    match blame {
+        Blame::Source(error) => fail(shell, command, source_argument, error),
+        Blame::Destination(error) => {
+            let subject = match into_directory {
+                Some(name) => format!("{}/{}", destination_argument.trim_end_matches('/'), name),
+                None => String::from(destination_argument),
+            };
+            fail(shell, command, &subject, error)
+        }
+    }
+}
+
+/// A `mv`/`cp` source and where it goes.
+struct Transfer {
+    source: Metadata,
+    target: String,
+    /// The target lies inside the destination directory (under the source's name).
+    into_directory: bool,
+}
+
+fn plan_transfer(volume: &mut Volume, arguments: (&str, &str), source: &str, destination: &str) -> Result<Transfer, Blame> {
+    let (source_argument, destination_argument) = arguments;
+    check_directory_argument(volume, source_argument, source).map_err(Blame::Source)?;
+    let source_metadata = volume.metadata(source).map_err(source_error)?;
+    check_directory_argument(volume, destination_argument, destination).map_err(Blame::Destination)?;
+    let target = destination_for(volume, source, &source_metadata.name, destination).map_err(destination_error)?;
+    let into_directory = target != destination;
+    Ok(Transfer { source: source_metadata, target, into_directory })
+}
+
+/// Runs `mv` or `cp` for every source operand.
+fn transfer_each(shell: &mut Shell, command: &str, operands: &[&str], action: fn(&mut Volume, &str, &Transfer) -> Result<(), Blame>) {
+    let Some((sources, destination_argument)) = sources_and_destination(shell, command, operands) else { return };
+    let destination = resolve(shell, destination_argument);
+    for source_argument in sources {
+        let source = resolve(shell, source_argument);
+        let arguments = (source_argument, destination_argument);
+        let mut into_directory = None;
+        let result = on_volume(|volume| {
+            if source == "/" {
+                return Ok(Err(source_error(fat32::Error::RootDirectory)));
+            }
+            let transfer = match plan_transfer(volume, arguments, &source, &destination) {
+                Ok(transfer) => transfer,
+                Err(blame) => return Ok(Err(blame)),
+            };
+            if transfer.into_directory {
+                into_directory = Some(transfer.source.name.clone());
+            }
+            Ok(action(volume, &source, &transfer))
+        });
+        let blame = match result {
+            Ok(Ok(())) => continue,
+            Ok(Err(blame)) => blame,
+            Err(error) => source_error(error),
+        };
+        fail_blamed(shell, command, arguments, into_directory.as_deref(), blame);
+    }
+}
+
 pub fn mv(shell: &mut Shell, arguments: &[&str]) {
     if arguments.len() < 2 {
         return usage(shell, "mv");
     }
-    let Some((sources, destination)) = sources_and_destination(shell, "mv", arguments) else { return };
-    let destination = resolve(shell, destination);
-    for source_argument in sources {
-        let source = resolve(shell, source_argument);
-        let result = on_volume(|volume| {
-            if source == "/" {
-                return Err(fat32::Error::RootDirectory.into());
-            }
-            let source_metadata = volume.metadata(&source)?;
-            let target = destination_for(volume, &source, &destination)?;
-            if target == source {
-                return Err(OpError::Message("source and destination are the same"));
-            }
-            if !path::same_path(&source, &target) {
-                match volume.metadata(&target) {
-                    Ok(existing) if existing.is_dir => return Err(fat32::Error::AlreadyExists.into()),
-                    Ok(_) if source_metadata.is_dir => return Err(OpError::Message("cannot replace a file with a directory")),
-                    // Like mv on Unix, an existing file is replaced.
-                    Ok(_) => volume.remove_file(&target)?,
-                    Err(error) if is_not_found(&error) => {}
-                    Err(error) => return Err(error.into()),
-                }
-            }
-            volume.rename(&source, &target)?;
-            Ok(())
-        });
-        if let Err(error) = result {
-            fail(shell, "mv", source_argument, error);
-        }
+    transfer_each(shell, "mv", arguments, move_entry);
+}
+
+fn move_entry(volume: &mut Volume, source: &str, transfer: &Transfer) -> Result<(), Blame> {
+    let target = transfer.target.as_str();
+    if target == source {
+        return Err(source_error(OpError::Message("source and destination are the same")));
     }
+    // A target that is the source itself under another spelling (other case, 8.3 alias) only
+    // renames it; it must never be removed as an "existing file" first.
+    if same_entry(volume, source, target).map_err(destination_error)? {
+        return volume.rename(source, target).map_err(destination_error);
+    }
+    // Check the new name before an existing file is replaced, so a bad name cannot cost it.
+    fat32::validate_name(path::file_name(target)).map_err(destination_error)?;
+    match volume.metadata(target) {
+        Ok(existing) if existing.is_dir => return Err(destination_error(fat32::Error::AlreadyExists)),
+        Ok(_) if transfer.source.is_dir => {
+            return Err(destination_error(OpError::Message("cannot replace a file with a directory")));
+        }
+        // Like mv on Unix, an existing file is replaced.
+        Ok(_) => volume.remove_file(target).map_err(destination_error)?,
+        Err(error) if is_not_found(&error) => {}
+        Err(error) => return Err(destination_error(error)),
+    }
+    volume.rename(source, target).map_err(destination_error)
 }
 
 pub fn cp(shell: &mut Shell, arguments: &[&str]) {
@@ -563,33 +770,32 @@ pub fn cp(shell: &mut Shell, arguments: &[&str]) {
     if operands.len() < 2 {
         return usage(shell, "cp");
     }
-    let recursive = flags.contains(&'r');
-    let Some((sources, destination)) = sources_and_destination(shell, "cp", &operands) else { return };
-    let destination = resolve(shell, destination);
-    for source_argument in sources {
-        let source = resolve(shell, source_argument);
-        let result = on_volume(|volume| {
-            let source_metadata = volume.metadata(&source)?;
-            let target = destination_for(volume, &source, &destination)?;
-            if path::same_path(&source, &target) {
-                return Err(OpError::Message("source and destination are the same"));
-            }
-            if source_metadata.is_dir {
-                if !recursive {
-                    return Err(OpError::Message("is a directory (use cp -r)"));
-                }
-                if path::is_within(&target, &source) {
-                    return Err(OpError::Message("cannot copy a directory into itself"));
-                }
-                copy_tree(volume, &source, &target, 0)
-            } else {
-                copy_file_replacing(volume, &source, &target)
-            }
-        });
-        if let Err(error) = result {
-            fail(shell, "cp", source_argument, error);
-        }
+    if flags.contains(&'r') {
+        transfer_each(shell, "cp", &operands, |volume, source, transfer| copy_entry(volume, source, transfer, true));
+    } else {
+        transfer_each(shell, "cp", &operands, |volume, source, transfer| copy_entry(volume, source, transfer, false));
     }
+}
+
+fn copy_entry(volume: &mut Volume, source: &str, transfer: &Transfer, recursive: bool) -> Result<(), Blame> {
+    let target = transfer.target.as_str();
+    if same_entry(volume, source, target).map_err(destination_error)? {
+        return Err(source_error(OpError::Message("source and destination are the same")));
+    }
+    if transfer.source.is_dir {
+        if !recursive {
+            return Err(source_error(OpError::Message("is a directory (use cp -r)")));
+        }
+        // Compare the paths as stored on disk, so an alias cannot hide that the target is inside.
+        let stored_source = canonical_case(volume, source).map_err(source_error)?;
+        let stored_target = canonical_prefix(volume, target).map_err(destination_error)?;
+        if path::is_within(&stored_target, &stored_source) {
+            return Err(destination_error(OpError::Message("cannot copy a directory into itself")));
+        }
+        return copy_tree(volume, source, target, 0).map_err(Blame::Destination);
+    }
+    fat32::validate_name(path::file_name(target)).map_err(destination_error)?;
+    copy_file_replacing(volume, source, target).map_err(Blame::Destination)
 }
 
 fn copy_file_replacing(volume: &mut Volume, source: &str, target: &str) -> Result<(), OpError> {
@@ -643,10 +849,14 @@ fn read_range(volume: &mut Volume, path: &str, offset: u64, limit: u64) -> fat32
 }
 
 /// Opens a regular file for reading: its size, or an error for directories.
-fn file_size(volume: &mut Volume, path: &str) -> fat32::Result<u64> {
+fn file_size(volume: &mut Volume, argument: &str, path: &str) -> Result<u64, OpError> {
+    if path::names_directory(argument) {
+        // `file.txt/`: a file is not a directory; a directory is caught below.
+        check_directory_argument(volume, argument, path)?;
+    }
     let metadata = volume.metadata(path)?;
     if metadata.is_dir {
-        return Err(fat32::Error::IsADirectory);
+        return Err(fat32::Error::IsADirectory.into());
     }
     Ok(metadata.size)
 }
@@ -658,7 +868,7 @@ pub fn cat(shell: &mut Shell, arguments: &[&str]) {
     for &argument in arguments {
         let path = resolve(shell, argument);
         let capturing = shell.is_capturing();
-        let size = match on_volume(|volume| Ok(file_size(volume, &path)?)) {
+        let size = match on_volume(|volume| file_size(volume, argument, &path)) {
             Ok(size) => size,
             Err(error) => {
                 fail(shell, "cat", argument, error);
@@ -668,7 +878,9 @@ pub fn cat(shell: &mut Shell, arguments: &[&str]) {
         if capturing {
             if size > super::MAX_CAPTURE_BYTES as u64 {
                 fail(shell, "cat", argument, format!("too large to redirect (limit {}; use cp to copy files)", human_size(super::MAX_CAPTURE_BYTES as u64)));
-                continue;
+                // Leave the redirect target alone rather than replacing it with partial output.
+                shell.abort_redirect();
+                return;
             }
             // Raw bytes, in chunks, so only the redirect buffer holds the whole file.
             let mut offset = 0;
@@ -757,7 +969,7 @@ pub fn head(shell: &mut Shell, arguments: &[&str]) {
     let Some((lines, file)) = line_count_arguments(shell, "head", arguments) else { return };
     let path = resolve(shell, file);
     let result = on_volume(|volume| {
-        let size = file_size(volume, &path)?;
+        let size = file_size(volume, file, &path)?;
         Ok(read_range(volume, &path, 0, size.min(HEAD_TAIL_WINDOW))?)
     });
     match result {
@@ -774,7 +986,7 @@ pub fn tail(shell: &mut Shell, arguments: &[&str]) {
     let Some((lines, file)) = line_count_arguments(shell, "tail", arguments) else { return };
     let path = resolve(shell, file);
     let result = on_volume(|volume| {
-        let size = file_size(volume, &path)?;
+        let size = file_size(volume, file, &path)?;
         let length = size.min(HEAD_TAIL_WINDOW);
         Ok(read_range(volume, &path, size - length, length)?)
     });
@@ -797,7 +1009,7 @@ pub fn hexdump(shell: &mut Shell, arguments: &[&str]) {
     let [file] = arguments else { return usage(shell, "hexdump") };
     let path = resolve(shell, file);
     let result = on_volume(|volume| {
-        let size = file_size(volume, &path)?;
+        let size = file_size(volume, file, &path)?;
         Ok((size, read_range(volume, &path, 0, size.min(HEXDUMP_LIMIT))?))
     });
     let (size, data) = match result {
@@ -848,6 +1060,7 @@ pub fn stat(shell: &mut Shell, arguments: &[&str]) {
     for (index, &argument) in arguments.iter().enumerate() {
         let path = resolve(shell, argument);
         let result = on_volume(|volume| {
+            check_directory_argument(volume, argument, &path)?;
             let metadata = volume.metadata(&path)?;
             let canonical = canonical_case(volume, &path)?;
             let entries = if metadata.is_dir { Some(volume.read_dir(&path)?.len()) } else { None };
@@ -904,8 +1117,9 @@ pub fn df(shell: &mut Shell, _: &[&str]) {
     shell.print_field("mounted", &format!("{} on / (FAT32)", info.source));
     shell.print_field("label", if info.label.is_empty() { "-" } else { &info.label });
     shell.print_field("size", &human_size(info.total_bytes));
-    shell.print_field("used", &format!("{} {} {}%", human_size(used), usage_bar(used, info.total_bytes, 30), percent));
-    shell.print_field("free", &human_size(info.free_bytes));
+    let (used_text, free_text) = used_and_free(used, info.free_bytes, info.total_bytes);
+    shell.print_field("used", &format!("{} {} {}%", used_text, usage_bar(used, info.total_bytes, 30), percent));
+    shell.print_field("free", &free_text);
     shell.print_field("clusters", &format!("{} x {} bytes", info.total_bytes / info.cluster_size.max(1) as u64, info.cluster_size));
     shell.print_field("volume id", &format!("{:04X}-{:04X}", info.volume_id >> 16, info.volume_id & 0xFFFF));
 }
@@ -1007,9 +1221,14 @@ pub fn umount(shell: &mut Shell, arguments: &[&str]) {
         return usage(shell, "umount");
     }
     if let Some(&target) = arguments.first() {
+        // Accepts `/`, the mounted source (`hd1p1`) or the drive it is on (`hd1`).
         let source = fs::mounted_source();
-        if target != "/" && source.as_deref().is_some_and(|source| !source.eq_ignore_ascii_case(target)) {
-            return shell.print_error(&format!("umount: {}: not mounted", target));
+        let names_mounted = |source: &str| {
+            let drive = source.find('p').map_or(source, |index| &source[..index]);
+            target == "/" || source.eq_ignore_ascii_case(target) || drive.eq_ignore_ascii_case(target)
+        };
+        if source.as_deref().is_some_and(|source| !names_mounted(source)) {
+            return shell.print_error(&format!("umount: {}: not mounted (/ is mounted from {})", target, source.unwrap_or_default()));
         }
     }
     match fs::unmount() {
@@ -1023,7 +1242,7 @@ pub fn umount(shell: &mut Shell, arguments: &[&str]) {
 
 pub fn sync(shell: &mut Shell, _: &[&str]) {
     if !fs::is_mounted() {
-        return shell.print_error(&format!("sync: {}", FsError::NotMounted));
+        return shell.println_colored("nothing to write: no file system is mounted", theme::MUTED);
     }
     match fs::sync() {
         Ok(()) => {
@@ -1059,6 +1278,7 @@ pub fn format_drive(shell: &mut Shell, arguments: &[&str]) {
         _ => return usage(shell, "format"),
     };
     if shell.is_capturing() {
+        shell.abort_redirect();
         return shell.print_error("format: asks for confirmation, so its output cannot be redirected");
     }
     let drive = match fs::drive(name) {

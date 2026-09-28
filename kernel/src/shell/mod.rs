@@ -37,6 +37,8 @@ pub struct Shell {
     /// Output of the running command while it is redirected into a file.
     capture: Option<Vec<u8>>,
     capture_overflowed: bool,
+    /// The redirected command refused to run (see `abort_redirect`): the target stays untouched.
+    capture_aborted: bool,
     /// Prompt of a question a command asks (see `read_input`); `None` at the command prompt.
     input_prompt: Option<String>,
     input_cancelled: bool,
@@ -52,6 +54,7 @@ pub fn run(display: Display) -> ! {
         editor: LineEditor::new(),
         capture: None,
         capture_overflowed: false,
+        capture_aborted: false,
         input_prompt: None,
         input_cancelled: false,
     };
@@ -68,6 +71,14 @@ impl Shell {
     /// Whether output currently goes into a file instead of the screen.
     pub fn is_capturing(&self) -> bool {
         self.capture.is_some()
+    }
+
+    /// Called by a command that refuses to run while its output is redirected (after printing why):
+    /// the redirect then writes nothing, so the target file is neither created nor emptied.
+    pub fn abort_redirect(&mut self) {
+        if self.capture.is_some() {
+            self.capture_aborted = true;
+        }
     }
 
     fn capture_bytes(&mut self, bytes: &[u8]) -> bool {
@@ -347,16 +358,28 @@ impl Shell {
         if is_dir {
             text.push('/');
         }
-        let mut replacement = match word.open_quote {
-            Some('\'') => format!("'{}{}", text, if finished { "'" } else { "" }),
-            Some(_) => parse::double_quote(&text, finished),
-            None if parse::needs_quotes(&text) => parse::double_quote(&text, finished),
-            None => text,
+        // A quoted completion is always closed, so the line stays valid when Enter follows. While
+        // the name is unfinished (a common prefix, or a directory to descend into) the cursor
+        // stays before the closing quote, so typing and Tab continue inside the quotes.
+        let quoted = match word.open_quote {
+            Some('\'') if !text.contains('\'') => Some(format!("'{}'", text)),
+            Some(_) => Some(parse::double_quote(&text, true)),
+            None if parse::needs_quotes(&text) => Some(parse::double_quote(&text, true)),
+            None => None,
+        };
+        let (mut replacement, inside_quote) = match quoted {
+            Some(quoted) => (quoted, !finished),
+            None => (text, false),
         };
         if finished {
             replacement.push(' ');
         }
-        self.editor.replace_before_cursor(&mut self.terminal, word.start, &replacement);
+        // A closing quote right after the cursor (left there by an earlier completion) is part
+        // of the word being replaced.
+        let cursor = self.editor.cursor();
+        let closing = word.open_quote.is_some_and(|quote| self.editor.chars().get(cursor) == Some(&quote));
+        let end = if closing { cursor + 1 } else { cursor };
+        self.editor.replace_range(&mut self.terminal, word.start, end, &replacement, if inside_quote { 1 } else { 0 });
     }
 
     /// Ambiguous completion: lists the options and redraws the prompt with the same input.
@@ -435,6 +458,11 @@ impl Shell {
                 self.print_error(&format!("rustkernel: {}: is a directory", redirect.path));
                 return;
             }
+            // `> logs/` names a directory, never a file called `logs`.
+            Ok(_) | Err(FsError::Fs(fat32::Error::NotFound)) if fs::path::names_directory(&redirect.path) => {
+                self.print_error(&format!("rustkernel: {}: no such directory", redirect.path));
+                return;
+            }
             Ok(_) | Err(FsError::Fs(fat32::Error::NotFound)) => {}
             Err(error) => {
                 self.print_error(&format!("rustkernel: {}: {}", redirect.path, error));
@@ -444,8 +472,12 @@ impl Shell {
 
         self.capture = Some(Vec::new());
         self.capture_overflowed = false;
+        self.capture_aborted = false;
         run(self, arguments);
         let output = self.capture.take().unwrap_or_default();
+        if core::mem::take(&mut self.capture_aborted) {
+            return;
+        }
         if self.capture_overflowed {
             self.print_error(&format!(
                 "rustkernel: {}: output larger than {} MiB or out of memory; nothing was written",

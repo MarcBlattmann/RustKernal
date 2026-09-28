@@ -4,8 +4,12 @@
 use core::iter::Peekable;
 use core::str::Chars;
 
+/// Deepest nesting of parentheses and unary minus signs. The parser recurses once per level on
+/// the small kernel stack, so a long run of `(` must be an error rather than a stack overflow.
+const MAX_DEPTH: usize = 64;
+
 pub fn evaluate(expression: &str) -> Result<i64, &'static str> {
-    let mut parser = Parser { characters: expression.chars().peekable() };
+    let mut parser = Parser { characters: expression.chars().peekable(), depth: 0 };
     let value = parser.expression()?;
     parser.skip_spaces();
     match parser.characters.peek() {
@@ -16,6 +20,8 @@ pub fn evaluate(expression: &str) -> Result<i64, &'static str> {
 
 struct Parser<'a> {
     characters: Peekable<Chars<'a>>,
+    /// Current nesting of `(` and unary `-`.
+    depth: usize,
 }
 
 impl Parser<'_> {
@@ -58,9 +64,20 @@ impl Parser<'_> {
         Ok(value)
     }
 
+    /// Runs `f` one nesting level deeper, failing beyond `MAX_DEPTH`.
+    fn nested(&mut self, f: impl FnOnce(&mut Self) -> Result<i64, &'static str>) -> Result<i64, &'static str> {
+        if self.depth >= MAX_DEPTH {
+            return Err("expression nested too deeply");
+        }
+        self.depth += 1;
+        let result = f(self);
+        self.depth -= 1;
+        result
+    }
+
     fn unary(&mut self) -> Result<i64, &'static str> {
         if self.next_operator(&['-']).is_some() {
-            return self.unary()?.checked_neg().ok_or("overflow");
+            return self.nested(|parser| parser.unary()?.checked_neg().ok_or("overflow"));
         }
         self.next_operator(&['+']);
         self.primary()
@@ -69,7 +86,7 @@ impl Parser<'_> {
     fn primary(&mut self) -> Result<i64, &'static str> {
         self.skip_spaces();
         if self.characters.next_if_eq(&'(').is_some() {
-            let value = self.expression()?;
+            let value = self.nested(|parser| parser.expression())?;
             self.skip_spaces();
             return match self.characters.next() {
                 Some(')') => Ok(value),
@@ -103,5 +120,36 @@ impl Parser<'_> {
             return Err("expected hex digits after 0x");
         }
         Ok(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::string::String;
+
+    #[test]
+    fn evaluates() {
+        assert_eq!(evaluate("(3 + 4) * 0x10"), Ok(112));
+        assert_eq!(evaluate("-(-2) - -3"), Ok(5));
+        assert_eq!(evaluate("7 % 0"), Err("division by zero"));
+    }
+
+    #[test]
+    fn deep_nesting_is_an_error() {
+        let nested = |depth: usize| {
+            let mut text = String::new();
+            (0..depth).for_each(|_| text.push('('));
+            text.push('1');
+            (0..depth).for_each(|_| text.push(')'));
+            text
+        };
+        assert_eq!(evaluate(&nested(MAX_DEPTH)), Ok(1));
+        assert_eq!(evaluate(&nested(MAX_DEPTH + 1)), Err("expression nested too deeply"));
+        assert_eq!(evaluate(&nested(100_000)), Err("expression nested too deeply"));
+        let minus: String = core::iter::repeat_n('-', 100_000).chain(core::iter::once('1')).collect();
+        assert_eq!(evaluate(&minus), Err("expression nested too deeply"));
+        let open: String = core::iter::repeat_n('(', 100_000).collect();
+        assert_eq!(evaluate(&open), Err("expression nested too deeply"));
     }
 }

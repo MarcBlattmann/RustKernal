@@ -24,6 +24,10 @@ use fat32::mbr::{self, Partition};
 use fat32::{BlockDevice, CachedDevice, DeviceError, FileSystem, FormatOptions, Timestamp, SECTOR_SIZE};
 use spin::Mutex;
 
+/// MBR partition types of GPT disks and EFI system partitions (boot disks of UEFI machines).
+const PARTITION_TYPE_GPT_PROTECTIVE: u8 = 0xEE;
+const PARTITION_TYPE_EFI_SYSTEM: u8 = 0xEF;
+
 /// Sectors kept in the write-back cache of the mounted volume (256 KiB).
 const CACHE_SECTORS: usize = 512;
 
@@ -141,7 +145,9 @@ pub struct Drive {
     pub name: &'static str,
     pub model: String,
     pub sector_count: u64,
-    /// Holds the partition the machine boots from (an MBR entry marked active).
+    /// Looks like the drive the machine boots from: an MBR partition is marked active, or the
+    /// disk is partitioned with GPT (a protective 0xEE entry) or holds an EFI system partition.
+    /// Such drives are never mounted, formatted or written to.
     pub is_boot: bool,
     pub partitions: Vec<PartitionInfo>,
     /// A file system on the whole disk, without a partition table ("superfloppy").
@@ -155,10 +161,14 @@ impl Drive {
         self.sector_count * SECTOR_SIZE as u64
     }
 
-    /// Whether `format` may erase this drive: not the boot drive, and large enough for FAT32.
+    /// Whether `format` may erase this drive: not the boot drive, readable (a drive whose
+    /// partition table could not be read might be the boot drive), and large enough for FAT32.
     pub fn check_formattable(&self) -> Result<(), FsError> {
         if self.is_boot {
             return Err(FsError::BootDrive(self.name));
+        }
+        if self.error.is_some() {
+            return Err(FsError::Unreadable(self.name));
         }
         if self.sector_count < mbr::PARTITION_ALIGNMENT + MIN_FAT32_SECTORS {
             return Err(FsError::TooSmall(self.name));
@@ -206,7 +216,11 @@ pub enum FsError {
     NotMounted,
     Fs(fat32::Error),
     NoSuchDrive(String),
+    /// `format` was given a partition (`hd1p1`); it works on whole drives.
+    NotAWholeDrive(String),
     BootDrive(&'static str),
+    /// The drive's partition table could not be read.
+    Unreadable(&'static str),
     AlreadyMounted(String),
     NoFileSystem(String),
     TooSmall(&'static str),
@@ -230,7 +244,15 @@ impl fmt::Display for FsError {
             FsError::NotMounted => f.write_str("no file system mounted (see 'lsblk' and 'mount')"),
             FsError::Fs(error) => write!(f, "{}", error),
             FsError::NoSuchDrive(name) => write!(f, "no drive or partition named '{}' (see 'lsblk')", name),
-            FsError::BootDrive(name) => write!(f, "{} is the boot drive; it holds the bootloader and kernel and is left alone", name),
+            FsError::NotAWholeDrive(name) => {
+                write!(f, "{} is a partition; format erases a whole drive (use 'format {}')", name, drive_part(name))
+            }
+            FsError::BootDrive(name) => write!(
+                f,
+                "{} looks like the boot drive (it has an active, GPT or EFI partition) and is left alone",
+                name
+            ),
+            FsError::Unreadable(name) => write!(f, "cannot read the partition table of {}, so it is left alone", name),
             FsError::AlreadyMounted(source) => write!(f, "{} is already mounted on / (run 'umount' first)", source),
             FsError::NoFileSystem(name) => write!(f, "no FAT32 file system on {} (run 'format {}' to create one)", name, drive_part(name)),
             FsError::TooSmall(name) => write!(f, "{} is too small for FAT32 (it needs about 34 MiB)", name),
@@ -368,7 +390,11 @@ fn probe_drive(index: usize) -> Drive {
             return drive;
         }
     };
-    drive.is_boot = partitions.iter().any(|partition| partition.bootable);
+    drive.is_boot = partitions.iter().any(|partition| {
+        partition.bootable
+            || partition.partition_type == PARTITION_TYPE_GPT_PROTECTIVE
+            || partition.partition_type == PARTITION_TYPE_EFI_SYSTEM
+    });
     if partitions.is_empty() {
         drive.whole_disk = probe_fs(&mut disk, 0);
     }
@@ -531,6 +557,9 @@ pub fn mount(target: &str) -> Result<VolumeInfo, FsError> {
     if drive.is_boot {
         return Err(FsError::BootDrive(drive.name));
     }
+    if drive.error.is_some() {
+        return Err(FsError::Unreadable(drive.name));
+    }
     let number = match number {
         Some(number) => Some(number),
         None => {
@@ -559,7 +588,7 @@ pub fn drive(name: &str) -> Result<Drive, FsError> {
     let state = STATE.lock();
     let (index, number) = find_drive(&state, name)?;
     if number.is_some() {
-        return Err(FsError::NoSuchDrive(String::from(name)));
+        return Err(FsError::NotAWholeDrive(name.trim().to_ascii_lowercase()));
     }
     Ok(state.drives[index].clone())
 }
@@ -576,7 +605,7 @@ pub fn format(name: &str, label: &str) -> Result<Option<VolumeInfo>, FsError> {
     let mut state = STATE.lock();
     let (index, number) = find_drive(&state, name)?;
     if number.is_some() {
-        return Err(FsError::NoSuchDrive(String::from(name)));
+        return Err(FsError::NotAWholeDrive(name.trim().to_ascii_lowercase()));
     }
     state.drives[index] = probe_drive(index);
     let drive = &state.drives[index];
@@ -629,7 +658,7 @@ pub fn status() -> Status {
     if let Some((source, error)) = &state.mount_error {
         return Status::MountFailed { source: source.clone(), error: error.clone() };
     }
-    match state.drives.iter().find(|drive| !drive.is_boot && !drive.has_fat32()) {
+    match state.drives.iter().find(|drive| !drive.is_boot && drive.error.is_none() && !drive.has_fat32()) {
         Some(drive) => Status::NoFileSystem(drive.clone()),
         None => Status::NoDataDrive,
     }

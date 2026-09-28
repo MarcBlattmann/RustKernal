@@ -60,15 +60,17 @@ ___
 ### Files
 
 At boot the kernel detects the drives, reads their partition tables and mounts the first FAT32
-volume it finds on a drive that is not the boot drive (the one with an active MBR partition, `hd0`
-under QEMU) at `/`. The shell's first lines say what happened, e.g.
+volume it finds on a drive that is not the boot drive (one with an active MBR partition, a GPT
+disk or an EFI system partition; `hd0` under QEMU) at `/`. The shell's first lines say what happened, e.g.
 `Storage: / mounted from hd1p1 (RUSTKERNAL, 125.0 MiB, 125.0 MiB free)`, or tell you to run
 `format hd1` when the data disk has no file system. Nothing is ever formatted automatically.
 
 The prompt shows the working directory (`rustkernel:/docs $`). Paths may be absolute or relative;
 `.`, `..` and `~` (the root) work, names are case-insensitive as on any FAT volume, and long names
 with spaces are fine when quoted: `cat "my notes.txt"`. Tab completes command names, file and
-directory names (directories get a trailing `/`) and drive names after `mount` and `format`.
+directory names (directories get a trailing `/`; names with spaces are quoted for you) and drive
+names after `mount` and `format`. A name may be up to 255 characters long; FAT does not allow
+`" * / : < > ? \ |`, and a name must not end with a dot or a space.
 
 | Command | What it does |
 |---------|--------------|
@@ -82,7 +84,7 @@ directory names (directories get a trailing `/`) and drive names after `mount` a
 | `touch`, `mkdir [-p]`, `rmdir` | create files and directories, remove empty directories |
 | `rm [-r] [-f]`, `mv`, `cp [-r]` | remove, move/rename and copy (into a directory if the target is one) |
 | `df`, `lsblk` | free space of the mounted volume; drives, partitions, labels and mounts |
-| `mount [drive]`, `umount`, `sync` | mount a drive or partition (`hd1`, `hd1p1`) on `/`, unmount it, flush it |
+| `mount [drive]`, `umount [/ \| drive]`, `sync` | mount a drive or partition (`hd1`, `hd1p1`) on `/`, unmount it, flush it |
 | `fsck` | read-only consistency check of the mounted volume |
 | `format <drive> [label]` | erase a drive and create one FAT32 partition (asks you to type the drive name again) |
 

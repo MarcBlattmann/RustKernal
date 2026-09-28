@@ -54,7 +54,7 @@ pub const COMMANDS: &[Command] = &[
     Command { name: "df", usage: "df", description: "Size and free space of the mounted volume", group: Group::Storage, run: fs_commands::df },
     Command { name: "lsblk", usage: "lsblk", description: "List drives, partitions and file systems", group: Group::Storage, run: fs_commands::lsblk },
     Command { name: "mount", usage: "mount [drive | partition]", description: "Show the mounted volume, or mount one on / (e.g. mount hd1)", group: Group::Storage, run: fs_commands::mount },
-    Command { name: "umount", usage: "umount", description: "Write everything and unmount the volume", group: Group::Storage, run: fs_commands::umount },
+    Command { name: "umount", usage: "umount [/ | drive]", description: "Write everything and unmount the volume", group: Group::Storage, run: fs_commands::umount },
     Command { name: "sync", usage: "sync", description: "Write all cached changes to the disk now", group: Group::Storage, run: fs_commands::sync },
     Command { name: "fsck", usage: "fsck", description: "Check the mounted volume for errors (read-only)", group: Group::Storage, run: fs_commands::fsck },
     Command { name: "format", usage: "format <drive> [label]", description: "Erase a drive and create a FAT32 file system on it", group: Group::Storage, run: fs_commands::format_drive },

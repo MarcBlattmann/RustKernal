@@ -6,7 +6,7 @@
 mod common;
 
 use common::*;
-use fat32::{BlockDevice, DeviceError, FileSystem, FormatOptions};
+use fat32::{BlockDevice, CachedDevice, DeviceError, FileSystem, FormatOptions};
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -44,7 +44,9 @@ type Op = fn(&mut FileSystem<CrashDisk>) -> fat32::Result<()>;
 
 /// Problems a crash may legitimately leave behind.
 fn acceptable(problem: &str, allow_duplicates: bool) -> bool {
-    if problem.contains("lost clusters") {
+    // Lost clusters and long-name entries whose short entry never reached the disk take space
+    // but reference nothing.
+    if problem.contains("lost clusters") || problem.contains("orphaned long-name entries") {
         return true;
     }
     // "chain has N clusters but the size (...) needs M" is fine when N > M (space leak only).
@@ -161,4 +163,129 @@ fn crash_during_directory_operations() {
         true,
     );
     run_scenario("rename dir", |fs| fs.rename("/docs/deep", "/other/deep moved"), &["/docs/deep", "/other"], true);
+}
+
+// ----- the kernel's stack: a write-back cache in front of the disk ----------------------------------
+
+/// Sectors the kernel caches (`CACHE_SECTORS` in kernel/src/fs/mod.rs).
+const KERNEL_CACHE_SECTORS: usize = 512;
+
+type CachedOp = fn(&mut FileSystem<CachedDevice<CrashDisk>>) -> fat32::Result<()>;
+
+/// Like `run_scenario`, but on the kernel's stack: the file system sits on a `CachedDevice`
+/// (which writes sectors back in its own order between flushes), is mounted and synced first,
+/// and the operation is followed by the sync the shell runs after every command. `verify` checks
+/// the files the operation touched on every intermediate disk state.
+fn run_cached_scenario(
+    name: &str,
+    op: CachedOp,
+    touched: &[&str],
+    allow_duplicates: bool,
+    verify: fn(&mut FileSystem<RamDisk>, &str, u64),
+) {
+    let base = base_image();
+    let mut reference = FileSystem::mount(base.clone()).unwrap();
+    let before = dump_ours(&mut reference);
+    drop(reference);
+
+    let mut budget = 0u64;
+    loop {
+        let limit = Rc::new(Cell::new(None));
+        let writes = Rc::new(Cell::new(0));
+        let device = CrashDisk { disk: base.clone(), budget: limit.clone(), writes: writes.clone() };
+        let mut fs = FileSystem::mount(CachedDevice::new(device, KERNEL_CACHE_SECTORS)).unwrap();
+        fs.sync().unwrap();
+        limit.set(Some(budget));
+        let result = op(&mut fs).and_then(|()| fs.sync());
+        let crashed = result.is_err();
+        let image = fs.device().inner().disk.clone();
+        drop(fs);
+
+        let mut after =
+            FileSystem::mount(image).unwrap_or_else(|e| panic!("{}: mount after {} writes: {:?}", name, budget, e));
+        let report = after.check().unwrap();
+        for problem in &report.problems {
+            assert!(
+                acceptable(problem, allow_duplicates),
+                "{} (cached): after {} writes: {}\n{:#?}",
+                name,
+                budget,
+                problem,
+                report.problems
+            );
+        }
+        let tree = dump_ours(&mut after);
+        for (path, contents) in &before {
+            if touched.iter().any(|t| path.starts_with(t)) {
+                continue;
+            }
+            assert_eq!(tree.get(path), Some(contents), "{} (cached): after {} writes: {} changed", name, budget, path);
+        }
+        verify(&mut after, name, budget);
+        if !crashed {
+            assert!(report.problems.is_empty(), "{} (cached): completed but {:?}", name, report.problems);
+            assert!(after.was_cleanly_unmounted(), "{} (cached): completed but not clean", name);
+            break;
+        }
+        budget += 1;
+        assert!(budget < 5000, "{} (cached): never completed", name);
+    }
+}
+
+fn no_verify(_: &mut FileSystem<RamDisk>, _: &str, _: u64) {}
+
+/// A file that exists must have its whole contents, never zeros or stale bytes.
+fn verify_many(fs: &mut FileSystem<RamDisk>, name: &str, budget: u64) {
+    if !fs.exists("/many").unwrap() {
+        return;
+    }
+    for entry in fs.read_dir("/many").unwrap() {
+        let index: u64 = entry.name.trim_start_matches('f').trim_end_matches(".txt").parse().unwrap();
+        let data = fs.read_file(&format!("/many/{}", entry.name)).unwrap();
+        assert_eq!(data, pattern(3000, index), "{}: after {} writes: /many/{} is damaged", name, budget, entry.name);
+    }
+}
+
+/// A newly created file that exists has its whole contents.
+fn verify_new(fs: &mut FileSystem<RamDisk>, name: &str, budget: u64) {
+    if let Ok(data) = fs.read_file("/new file with a long name.bin") {
+        assert_eq!(data, pattern(20_000, 1), "{}: after {} writes: the new file is damaged", name, budget);
+    }
+}
+
+#[test]
+fn crash_with_write_back_cache() {
+    run_cached_scenario("create", |fs| fs.write_file("/new file with a long name.bin", &pattern(20_000, 1)), &["/new"], false, verify_new);
+    // Replacing reuses the file's clusters, so after a crash its contents may be mixed; the
+    // structure (entry size against its chain) must still be consistent.
+    run_cached_scenario("replace shrink", |fs| fs.write_file("/victim.bin", b"small"), &["/victim.bin"], false, no_verify);
+    run_cached_scenario("truncate shrink", |fs| fs.truncate("/victim.bin", 100), &["/victim.bin"], false, no_verify);
+    run_cached_scenario("remove file", |fs| fs.remove_file("/victim.bin"), &["/victim.bin"], false, no_verify);
+    run_cached_scenario("remove tree", |fs| fs.remove_dir_all("/docs"), &["/docs"], false, no_verify);
+    run_cached_scenario("mkdir -p", |fs| fs.create_dir_all("/a/b/c/d"), &["/a"], false, no_verify);
+    run_cached_scenario("copy", |fs| fs.copy_file("/docs/deep/deeper/big.bin", "/other/copy.bin"), &["/other"], false, no_verify);
+    run_cached_scenario(
+        "rename dir",
+        |fs| fs.rename("/docs/deep", "/other/deep moved"),
+        &["/docs/deep", "/other"],
+        true,
+        no_verify,
+    );
+}
+
+#[test]
+fn crash_while_creating_many_files_with_write_back_cache() {
+    run_cached_scenario(
+        "many files",
+        |fs| {
+            fs.create_dir("/many")?;
+            for i in 0..40u64 {
+                fs.write_file(&format!("/many/f{}.txt", i), &pattern(3000, i))?;
+            }
+            Ok(())
+        },
+        &["/many"],
+        false,
+        verify_many,
+    );
 }

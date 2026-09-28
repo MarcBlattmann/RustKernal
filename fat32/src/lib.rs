@@ -22,7 +22,15 @@
 //! clusters (allocated in the FAT but unreachable) rather than corrupt or cross-linked files:
 //! clusters are linked in the FAT and data is written before a directory entry points at them,
 //! and directory entries are removed before their clusters are freed. The FAT[1] clean-shutdown
-//! bit is cleared while the volume has unsynced modifications.
+//! bit is cleared while the volume has unsynced modifications. The one exception is `rename`,
+//! which creates the new entry before it removes the old one: an interruption between the two
+//! leaves both names pointing at the same data rather than losing the file (a failed rename
+//! removes the new entry again; if even that fails, the volume refuses further changes until it
+//! is mounted again).
+//!
+//! The order is enforced with write barriers ([`BlockDevice::flush`]) at every point where it
+//! matters, so it also holds on top of a write-back cache such as [`CachedDevice`], which may
+//! write sectors back in any order between two flushes.
 
 #![cfg_attr(not(test), no_std)]
 
@@ -110,8 +118,8 @@ pub enum Error {
     NotADirectory,
     IsADirectory,
     DirectoryNotEmpty,
-    /// Name contains characters FAT does not allow, is empty, `.`/`..` where not allowed, or is
-    /// longer than 255 UTF-16 units.
+    /// Name contains characters FAT does not allow, is empty, `.`/`..` where not allowed, or ends
+    /// with a dot or a space. (Names longer than 255 UTF-16 units are `NameTooLong`.)
     InvalidName,
     /// Path is not absolute or otherwise malformed.
     InvalidPath,
@@ -125,6 +133,8 @@ pub enum Error {
     Unsupported(&'static str),
     /// Operation on the root directory that is not allowed (remove, rename).
     RootDirectory,
+    /// Name is longer than 255 UTF-16 units.
+    NameTooLong,
 }
 
 impl From<DeviceError> for Error {
@@ -152,6 +162,7 @@ impl core::fmt::Display for Error {
             Error::Corrupt(what) => write!(f, "file system corrupt: {}", what),
             Error::Unsupported(what) => write!(f, "unsupported: {}", what),
             Error::RootDirectory => f.write_str("operation not permitted on the root directory"),
+            Error::NameTooLong => f.write_str("file name too long (at most 255 characters)"),
         }
     }
 }
@@ -214,6 +225,14 @@ pub fn format<D: BlockDevice>(device: &mut D, options: &FormatOptions) -> Result
     format::format(device, options)
 }
 
+/// Checks whether `name` can be used for a new file or directory (one path component): not
+/// empty, not `.`/`..`, none of the characters FAT forbids (`" * / : < > ? \ |` and control
+/// characters), no trailing dot or space, and at most 255 UTF-16 units. Returns `InvalidName` or
+/// `NameTooLong` otherwise.
+pub fn validate_name(name: &str) -> Result<()> {
+    name::validate_name(name)
+}
+
 /// Remembers where the last walk along a cluster chain ended so sequential access does not
 /// re-walk the chain from its first cluster every time.
 #[derive(Debug, Clone, Copy)]
@@ -249,6 +268,9 @@ pub struct FileSystem<D: BlockDevice> {
     was_clean: bool,
     /// The device rejected writes at mount time; every mutating call fails.
     read_only: bool,
+    /// A failed rename could not be undone (see the crate docs); every mutating call fails until
+    /// the volume is mounted again, so nothing frees clusters that two entries share.
+    poisoned: bool,
     now: fn() -> Timestamp,
     chain_hints: [Option<ChainHint>; CHAIN_HINTS],
     next_hint: usize,

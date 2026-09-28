@@ -55,11 +55,21 @@ pub fn edit(shell: &mut Shell, arguments: &[&str]) {
         return;
     };
     if shell.is_capturing() {
+        shell.abort_redirect();
         shell.print_error("edit: the editor's screen cannot be redirected into a file");
         return;
     }
-
     let path = fs::normalize(&shell.cwd, argument);
+    if fs::path::names_directory(argument) {
+        // `edit name/` never means the file `name`.
+        let problem = match fs::with_volume(|volume| volume.metadata(&path)) {
+            Ok(metadata) if metadata.is_dir => "is a directory",
+            Ok(_) => "not a directory",
+            Err(_) => "no such directory",
+        };
+        shell.print_error(&format!("edit: {}: {}", argument, problem));
+        return;
+    }
     let document = match Document::open(&path) {
         Ok(document) => document,
         Err(message) => {
@@ -133,6 +143,10 @@ impl Document {
     }
 
     fn new_file(path: &str) -> Result<Self, String> {
+        // Refuse a name that could never be saved (FAT forbids it) before any text is typed.
+        if let Err(error) = fat32::validate_name(fs::path::file_name(path)) {
+            return Err(format!("{}", error));
+        }
         let parent = fs::path::parent(path);
         match fs::with_volume(|volume| volume.metadata(parent)) {
             Ok(metadata) if metadata.is_dir => {}

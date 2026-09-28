@@ -90,31 +90,25 @@ impl BlockDevice for FileDisk {
     }
 }
 
-/// Deletes a half-built image if creation fails or panics, so a broken file is never mistaken
-/// for the user's disk.
+/// Deletes the temporary name of the image when creation ends: after a failure or panic the
+/// half-built file is gone, after success only the published name remains.
 struct RemoveOnDrop<'a> {
     path: &'a Path,
-    armed: bool,
 }
 
 impl Drop for RemoveOnDrop<'_> {
     fn drop(&mut self) {
-        if self.armed {
-            let _ = fs::remove_file(self.path);
-        }
+        let _ = fs::remove_file(self.path);
     }
 }
 
 /// Makes sure the data disk at `path` exists, creating and formatting it if it does not.
 /// Returns whether a new disk was created.
 pub fn ensure_data_disk(path: &Path) -> Result<bool, String> {
-    if path.exists() {
-        let metadata = fs::metadata(path).map_err(|error| format!("cannot read {}: {}", path.display(), error))?;
-        if !metadata.is_file() {
-            return Err(format!("{} exists but is not a file", path.display()));
-        }
-        println!("Data disk: {} ({} MiB, existing, left untouched)", path.display(), metadata.len() / (1024 * 1024));
-        return Ok(false);
+    // `try_exists` rather than `exists`: an error (e.g. no permission) must not look like "missing"
+    // and lead to a new disk being created over the user's.
+    if path.try_exists().map_err(|error| format!("cannot check {}: {}", path.display(), error))? {
+        return describe_existing(path).map(|()| false);
     }
 
     println!("Data disk: {} does not exist, creating it", path.display());
@@ -122,20 +116,47 @@ pub fn ensure_data_disk(path: &Path) -> Result<bool, String> {
         fs::create_dir_all(parent).map_err(|error| format!("cannot create {}: {}", parent.display(), error))?;
     }
 
-    // Build the image under a temporary name and rename it into place only when it is complete,
-    // so an interrupted run never leaves a half-formatted disk behind at `path`.
+    // Build the image under a temporary name (unique to this process, so two runners starting at
+    // once do not share it) and publish it only when it is complete, so an interrupted run never
+    // leaves a half-formatted disk behind at `path`.
     let mut partial_name = path.file_name().unwrap_or_default().to_os_string();
-    partial_name.push(".partial");
+    partial_name.push(format!(".{}.partial", std::process::id()));
     let partial = path.with_file_name(partial_name);
     let _ = fs::remove_file(&partial);
-    let mut cleanup = RemoveOnDrop { path: &partial, armed: true };
+    let _cleanup = RemoveOnDrop { path: &partial };
 
     create_image(&partial, DEFAULT_DISK_SIZE)?;
-    fs::rename(&partial, path)
-        .map_err(|error| format!("cannot move {} to {}: {}", partial.display(), path.display(), error))?;
-    cleanup.armed = false;
+    // A hard link publishes the image without ever replacing anything: unlike `rename`, it fails
+    // if a disk appeared at `path` in the meantime (another runner, or the user restoring one).
+    match fs::hard_link(&partial, path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            println!("  {} appeared while the new disk was being built; keeping it", path.display());
+            return describe_existing(path).map(|()| false);
+        }
+        // File systems without hard links: check again right before a (replacing) rename.
+        Err(_) if !path.try_exists().map_err(|error| format!("cannot check {}: {}", path.display(), error))? => {
+            fs::rename(&partial, path)
+                .map_err(|error| format!("cannot move {} to {}: {}", partial.display(), path.display(), error))?;
+        }
+        Err(_) => {
+            println!("  {} appeared while the new disk was being built; keeping it", path.display());
+            return describe_existing(path).map(|()| false);
+        }
+    }
+    // `_cleanup` removes the partial name; the image lives on under `path`.
     println!("  done: {} is ready", path.display());
     Ok(true)
+}
+
+/// Prints what the existing data disk at `path` is, or fails if it is not a file.
+fn describe_existing(path: &Path) -> Result<(), String> {
+    let metadata = fs::metadata(path).map_err(|error| format!("cannot read {}: {}", path.display(), error))?;
+    if !metadata.is_file() {
+        return Err(format!("{} exists but is not a file", path.display()));
+    }
+    println!("Data disk: {} ({} MiB, existing, left untouched)", path.display(), metadata.len() / (1024 * 1024));
+    Ok(())
 }
 
 fn create_image(path: &Path, size: u64) -> Result<(), String> {
@@ -217,6 +238,23 @@ mod tests {
         assert_eq!(civil_from_days(10_957), (2000, 1, 1));
         assert_eq!(civil_from_days(11_016), (2000, 2, 29));
         assert_eq!(civil_from_days(20_719), (2026, 9, 23));
+    }
+
+    #[test]
+    fn data_disk_is_created_once_and_never_replaced() {
+        let directory = std::env::temp_dir().join(format!("rustkernal-disk-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        let path = directory.join("disk.img");
+        assert!(ensure_data_disk(&path).unwrap(), "first call creates the disk");
+        assert_eq!(fs::metadata(&path).unwrap().len(), DEFAULT_DISK_SIZE);
+        // Only the published image is left, no temporary file.
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+
+        // An existing image (whatever it holds) is left alone.
+        fs::write(&path, b"user data").unwrap();
+        assert!(!ensure_data_disk(&path).unwrap());
+        assert_eq!(fs::read(&path).unwrap(), b"user data");
+        fs::remove_dir_all(&directory).unwrap();
     }
 
     #[test]
